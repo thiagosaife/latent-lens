@@ -19,12 +19,14 @@ from collections.abc import AsyncIterator
 
 from . import datasets as ds_mod
 from . import llm, ml
-from .catalog import CATALOG, DEFAULT_PLAN, propose_plan
+from .catalog import CATALOG, DEFAULT_PLAN, build_plan, catalog_meta
 from .events import sse
 from .runs import RUNS, RunState
 
 log = logging.getLogger("latentlens.run")
-_FOLLOW_UP = ("explain", "selected", "in common", "this segment")
+# Specific to the lasso → "explain these N selected points have in common"
+# follow-up (which skips planning), so it doesn't hijack initial goals.
+_FOLLOW_UP = ("selected points", "in common")
 
 
 def _newid(prefix: str) -> str:
@@ -69,7 +71,10 @@ async def run_stream(goal: str, dataset_id: str | None = None) -> AsyncIterator[
             async for frame in _exec_explain(goal):
                 yield frame
         else:
-            yield sse({"type": "plan_proposed", "runId": run_id, "steps": propose_plan()})
+            # Planner decomposes the goal into an ordered plan (Claude, or a
+            # goal-aware heuristic). Off the event loop — the Claude call blocks.
+            planned = await asyncio.to_thread(llm.generate_plan, goal, catalog_meta())
+            yield sse({"type": "plan_proposed", "runId": run_id, "steps": build_plan(planned)})
             edited = await state.plan_gate  # resolved by POST /api/runs/:id/plan
             if not state.cancelled:
                 ids = [s for s in (edited or DEFAULT_PLAN) if s in CATALOG] or DEFAULT_PLAN

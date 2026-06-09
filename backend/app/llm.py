@@ -103,3 +103,81 @@ def generate_explain_summary(goal: str, count: int) -> dict:
         "bullets": ["Above-median recency", "Lower signup_source missingness", "Dominated by 2 clusters"],
         "tone": "neutral",
     }
+
+
+# ── Planner: decompose the goal into an ordered plan ────────────────────────
+
+def generate_plan(goal: str, catalog_meta: list[dict]) -> list[dict]:
+    """Choose + order analysis steps for the goal → [{id, reason}]. Claude when a
+    key is set (constrained to the catalog via an enum schema); else a goal-aware
+    heuristic that still adapts the plan offline."""
+    try:
+        steps = _claude_plan(goal, catalog_meta)
+        log.info(json.dumps({"msg": "llm.plan", "source": "claude", "steps": [s["id"] for s in steps]}))
+        return steps
+    except Exception as e:
+        steps = _heuristic_plan(goal, catalog_meta)
+        log.warning(json.dumps({"msg": "llm.plan", "source": "heuristic", "steps": [s["id"] for s in steps], "reason": str(e)[:160]}))
+        return steps
+
+
+def _claude_plan(goal: str, catalog_meta: list[dict]) -> list[dict]:
+    import anthropic
+
+    client = anthropic.Anthropic()  # raises if no credentials
+    ids = [s["id"] for s in catalog_meta]
+    schema = {
+        "type": "object",
+        "properties": {
+            "steps": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {"id": {"type": "string", "enum": ids}, "reason": {"type": "string"}},
+                    "required": ["id", "reason"],
+                    "additionalProperties": False,
+                },
+            }
+        },
+        "required": ["steps"],
+        "additionalProperties": False,
+    }
+    catalog_txt = "\n".join(f"- {s['id']}: {s['title']} — {s['description']}" for s in catalog_meta)
+    prompt = (
+        "You are a data-analysis planner. Choose and ORDER analysis steps into a plan for "
+        "the user's goal. Use only the given step ids. Respect dependencies: profile and "
+        "clean before reduce; reduce before cluster; summarize last. One-line reason per step.\n\n"
+        f"Goal: {goal!r}\n\nAvailable steps:\n{catalog_txt}"
+    )
+    resp = client.messages.create(
+        model=MODEL,
+        max_tokens=1024,
+        output_config={"effort": "high", "format": {"type": "json_schema", "schema": schema}},
+        messages=[{"role": "user", "content": prompt}],
+    )
+    text = next((b.text for b in resp.content if getattr(b, "type", None) == "text"), None)
+    if not text:
+        raise ValueError("no text block in response")
+    data = json.loads(text)
+    steps = [{"id": s["id"], "reason": s.get("reason", "")} for s in data.get("steps", []) if s.get("id") in ids]
+    if not steps:
+        raise ValueError("empty plan")
+    return steps
+
+
+def _heuristic_plan(goal: str, catalog_meta: list[dict]) -> list[dict]:
+    """Goal-aware fallback — adapts the plan to keywords, no LLM needed."""
+    available = {s["id"] for s in catalog_meta}
+    g = goal.lower()
+    steps: list[tuple[str, str]] = [("profile", "Profile types, distributions, and missingness")]
+    if not any(w in g for w in ("raw", "already clean", "skip clean", "no clean")):
+        steps.append(("clean", "Impute missing values and drop duplicates"))
+    wants_structure = any(
+        w in g for w in ("structure", "segment", "cluster", "group", "pattern", "embedding", "reduce", "visual", "explore", "find")
+    )
+    if wants_structure:
+        steps.append(("reduce", "Project to 2D to reveal structure"))
+        steps.append(("cluster", "Discover dense segments"))
+    if wants_structure or any(w in g for w in ("summary", "summarize", "describe", "explain", "name", "label")):
+        steps.append(("summarize", "Summarize the discovered segments"))
+    return [{"id": i, "reason": r} for i, r in steps if i in available]

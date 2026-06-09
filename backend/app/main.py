@@ -12,12 +12,13 @@ from __future__ import annotations
 
 import logging
 
-from fastapi import FastAPI, Response
+from fastapi import FastAPI, File, HTTPException, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from . import VERSION, ml
+from . import datasets as ds_mod
 from .orchestrator import run_stream
 from .runs import RUNS
 
@@ -31,6 +32,7 @@ SSE_HEADERS = {"Cache-Control": "no-cache, no-transform", "Connection": "keep-al
 
 class RunBody(BaseModel):
     goal: str | None = None
+    datasetId: str | None = None
 
 
 class StepRef(BaseModel):
@@ -51,10 +53,23 @@ def health() -> dict:
     return {"status": "ok", "version": VERSION, "activeRuns": len(RUNS)}
 
 
+@app.post("/api/datasets")
+async def upload_dataset(file: UploadFile = File(...)) -> dict:
+    raw = await file.read()
+    if len(raw) > ds_mod.MAX_BYTES:
+        raise HTTPException(status_code=413, detail="file too large")
+    try:
+        dataset = ds_mod.parse_upload(file.filename or "upload.csv", raw)
+    except Exception as e:  # parse errors → 400 with the reason
+        raise HTTPException(status_code=400, detail=f"could not parse dataset: {e}")
+    dataset_id = ds_mod.register(dataset)
+    return {"datasetId": dataset_id, "name": dataset.name, **ds_mod.preview(dataset)}
+
+
 @app.post("/api/runs")
 async def create_run(body: RunBody) -> StreamingResponse:
     goal = (body.goal or "").strip() or "Explore this dataset."
-    return StreamingResponse(run_stream(goal), media_type="text/event-stream", headers=SSE_HEADERS)
+    return StreamingResponse(run_stream(goal, body.datasetId), media_type="text/event-stream", headers=SSE_HEADERS)
 
 
 @app.post("/api/runs/{run_id}/plan", status_code=204)

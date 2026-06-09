@@ -17,6 +17,7 @@ import secrets
 import time
 from collections.abc import AsyncIterator
 
+from . import datasets as ds_mod
 from . import llm, ml
 from .catalog import CATALOG, DEFAULT_PLAN, propose_plan
 from .events import sse
@@ -44,15 +45,15 @@ def _fmt_rows(n: int | None) -> str:
 class Ctx:
     """Accumulates results across steps (dataset → profile → embedding → sizes)."""
 
-    def __init__(self, goal: str):
+    def __init__(self, goal: str, dataset: ml.Dataset):
         self.goal = goal
-        self.dataset = ml.generate_dataset()
+        self.dataset = dataset
         self.profile: dict | None = None
         self.points_ref: str | None = None
         self.sizes: list[int] = []
 
 
-async def run_stream(goal: str) -> AsyncIterator[str]:
+async def run_stream(goal: str, dataset_id: str | None = None) -> AsyncIterator[str]:
     run_id, trace_id = _newid("run_"), _newid("trace_")
     loop = asyncio.get_running_loop()
     state = RunState(run_id=run_id, trace_id=trace_id, plan_gate=loop.create_future())
@@ -72,7 +73,8 @@ async def run_stream(goal: str) -> AsyncIterator[str]:
             edited = await state.plan_gate  # resolved by POST /api/runs/:id/plan
             if not state.cancelled:
                 ids = [s for s in (edited or DEFAULT_PLAN) if s in CATALOG] or DEFAULT_PLAN
-                ctx = Ctx(goal)
+                dataset = ds_mod.get_dataset(dataset_id) or ml.generate_dataset()
+                ctx = Ctx(goal, dataset)
                 for sid in ids:
                     if state.cancelled:
                         break
@@ -145,11 +147,10 @@ async def _exec_step(sid: str, ctx: Ctx, state: RunState, run_id: str) -> AsyncI
 def _tools_for(sid: str, ctx: Ctx) -> list[tuple[str, dict, str]]:
     if sid == "clean":
         ds = ctx.dataset
-        imputed = int(round(ds.missing_by_col["signup_source"] * ds.n))
         return [
-            ("impute", {"column": "signup_source", "strategy": "mode"}, f"{imputed:,} cells imputed"),
-            ("drop_duplicates", {"key": "customer_id"}, f"{ds.duplicates} duplicate rows"),
-            ("log_scale", {"column": "last_login"}, "applied"),
+            ("impute", {"strategy": "mean"}, f"{ds.missing_cells:,} cells imputed"),
+            ("drop_duplicates", {}, f"{ds.duplicates} duplicate rows"),
+            ("standardize", {"columns": len(ds.numeric_cols)}, f"{len(ds.numeric_cols)} numeric columns scaled"),
         ]
     if sid == "cluster":
         k = len(ctx.sizes) or ml.K_CLUSTERS
@@ -164,8 +165,10 @@ def _intents_for(sid: str, ctx: Ctx, run_id: str) -> list[dict]:
     if sid == "profile":
         p = ml.profile_dataset(ctx.dataset)
         ctx.profile = p
-        flagged = p["flagged_high_missing"]
-        bullets = [f"{c} — {int(p['missing_by_col'][c] * 100)}% missing" for c in flagged] + ["No duplicate customer ids"]
+        flagged = p["flagged_high_missing"][:4]
+        dup = p["duplicates"]
+        bullets = [f"{c} — {int(p['missing_by_col'][c] * 100)}% missing" for c in flagged]
+        bullets.append(f"{dup:,} duplicate rows" if dup else "No duplicate rows")
         return [
             {"component": "stat_tile", "props": {"label": "Rows profiled", "value": p["rows"]}},
             {"component": "stat_tile", "props": {"label": "Missing cells", "value": p["missing_fraction"], "format": "percent"}},
@@ -183,14 +186,18 @@ def _intents_for(sid: str, ctx: Ctx, run_id: str) -> list[dict]:
 
     if sid == "clean":
         ds = ctx.dataset
-        imputed = int(round(ds.missing_by_col["signup_source"] * ds.n))
         return [
             {
                 "component": "summary_card",
                 "props": {
                     "title": "Cleaning complete",
-                    "body": "Mode-imputed signup_source, log-scaled last_login, and removed duplicates.",
-                    "bullets": [f"{imputed:,} cells imputed", f"{ds.duplicates} rows dropped"],
+                    "body": f"Imputed {ds.missing_cells:,} missing cells, removed {ds.duplicates} duplicate rows, "
+                    f"and standardized {len(ds.numeric_cols)} numeric columns.",
+                    "bullets": [
+                        f"{ds.missing_cells:,} cells imputed",
+                        f"{ds.duplicates} duplicate rows removed",
+                        f"{len(ds.numeric_cols)} columns standardized",
+                    ],
                     "tone": "neutral",
                 },
             }

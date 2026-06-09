@@ -10,6 +10,8 @@ export interface StreamOptions {
   /** Endpoint that returns `text/event-stream`. Defaults to the dev-proxied path. */
   url?: string
   signal?: AbortSignal
+  /** Analyze an uploaded dataset instead of the synthetic default. */
+  datasetId?: string
 }
 
 /**
@@ -31,7 +33,7 @@ export async function streamRun(
     res = await fetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Accept: 'text/event-stream', ...authHeaders() },
-      body: JSON.stringify({ goal }),
+      body: JSON.stringify(opts.datasetId ? { goal, datasetId: opts.datasetId } : { goal }),
       signal: opts.signal,
     })
   } catch (err) {

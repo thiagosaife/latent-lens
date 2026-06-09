@@ -1,7 +1,7 @@
 """Real ML for the analysis pipeline — numpy only (no pandas/sklearn/umap), so
 there are no native-wheel surprises on new Python versions. PCA is computed via
-SVD; clustering via a small k-means. A synthetic customer dataset with latent
-segment structure stands in for an uploaded CSV (a follow-up will add upload)."""
+SVD; clustering via a small k-means. A synthetic dataset is the default; uploaded
+CSV/Parquet datasets (see datasets.py) flow through the same Dataset shape."""
 
 from __future__ import annotations
 
@@ -13,19 +13,21 @@ RNG_SEED = 42
 N_ROWS = 50_000
 N_NUMERIC = 12
 K_CLUSTERS = 6
+MAX_EMBED_POINTS = 100_000  # subsample the embedding above this for responsiveness
 
 # In-memory embedding store: pointsRef -> (n, 3) float32 [x, y, cluster].
-# A real deployment would use an object store with TTL; fine in-process here.
 _EMBEDDINGS: dict[str, np.ndarray] = {}
 
 
 @dataclass
 class Dataset:
-    features: np.ndarray  # (n, N_NUMERIC) float32 with latent cluster structure
+    name: str
+    features: np.ndarray  # (n, n_numeric) float32, NaN-imputed — the embedding input
     n: int
     numeric_cols: list[str]
     categorical_cols: list[str]
-    missing_by_col: dict[str, float]  # fraction missing, per flagged column
+    missing_by_col: dict[str, float]  # fraction missing, per column that has any
+    missing_cells: int  # total missing cells across all columns
     duplicates: int
 
 
@@ -40,29 +42,35 @@ def generate_dataset(seed: int = RNG_SEED, n: int = N_ROWS, k: int = K_CLUSTERS)
     numeric_cols = [f"feat_{i}" for i in range(N_NUMERIC - 4)] + ["recency", "spend", "tenure", "last_login"]
     categorical_cols = ["signup_source", "plan", "region", "device"]
     missing_by_col = {"signup_source": 0.41, "last_login": 0.08}
-    return Dataset(features, n, numeric_cols, categorical_cols, missing_by_col, duplicates=0)
+    missing_cells = sum(int(round(frac * n)) for frac in missing_by_col.values())
+    return Dataset("synthetic (50k)", features, n, numeric_cols, categorical_cols, missing_by_col, missing_cells, duplicates=0)
 
 
 def profile_dataset(ds: Dataset) -> dict:
-    """Real column/missingness stats over the dataset."""
+    """Column/missingness stats over the dataset (works for synthetic or uploaded)."""
     numeric = len(ds.numeric_cols)
     categorical = len(ds.categorical_cols)
-    total_cells = ds.n * (numeric + categorical)
-    missing_cells = sum(int(round(frac * ds.n)) for frac in ds.missing_by_col.values())
+    total_cells = ds.n * max(numeric + categorical, 1)
     return {
+        "name": ds.name,
         "rows": ds.n,
         "numeric": numeric,
         "categorical": categorical,
-        "missing_fraction": round(missing_cells / total_cells, 4),
-        "missing_by_col": {c: round(f, 3) for c, f in ds.missing_by_col.items()},
+        "missing_fraction": round(ds.missing_cells / total_cells, 4) if total_cells else 0.0,
+        "missing_cells": ds.missing_cells,
+        "missing_by_col": ds.missing_by_col,
         "flagged_high_missing": [c for c, f in ds.missing_by_col.items() if f > 0.30],
         "duplicates": ds.duplicates,
     }
 
 
 def _pca_2d(features: np.ndarray) -> np.ndarray:
-    """Project to the top-2 principal components via SVD; normalize to [-1, 1]."""
+    """Project to the top-2 principal components via SVD; normalize to [-1, 1].
+    Always returns (n, 2), padding when the data has fewer than 2 columns."""
     x = features - features.mean(axis=0, keepdims=True)
+    if x.shape[1] < 2:
+        pad = np.zeros((len(x), 2 - x.shape[1]), dtype=x.dtype)
+        x = np.column_stack([x, pad])
     _, _, vt = np.linalg.svd(x, full_matrices=False)
     proj = x @ vt[:2].T
     scale = float(np.max(np.abs(proj))) or 1.0
@@ -84,11 +92,21 @@ def _kmeans(points: np.ndarray, k: int, iters: int = 12, seed: int = RNG_SEED) -
 
 
 def build_embedding(run_id: str, ds: Dataset, k: int = K_CLUSTERS) -> tuple[str, int, list[int]]:
-    """Compute the 2D embedding + cluster labels, store by ref, return
-    (pointsRef, n, cluster_sizes). The frontend fetches the points by ref."""
-    coords = _pca_2d(ds.features)
+    """Standardize → PCA(2D) → k-means; store points by ref. Subsamples above
+    MAX_EMBED_POINTS so huge uploads stay responsive."""
+    feats = ds.features
+    if ds.n > MAX_EMBED_POINTS:
+        idx = np.random.default_rng(RNG_SEED).choice(ds.n, MAX_EMBED_POINTS, replace=False)
+        feats = feats[idx]
+    n_pts = len(feats)
+
+    mu = feats.mean(0, keepdims=True)
+    sd = feats.std(0, keepdims=True)
+    sd[sd == 0] = 1.0
+    coords = _pca_2d((feats - mu) / sd)
     labels = _kmeans(coords, k)
-    pts = np.empty((ds.n, 3), dtype=np.float32)
+
+    pts = np.empty((n_pts, 3), dtype=np.float32)
     pts[:, 0] = coords[:, 0]
     pts[:, 1] = coords[:, 1]
     pts[:, 2] = labels.astype(np.float32)
@@ -96,7 +114,7 @@ def build_embedding(run_id: str, ds: Dataset, k: int = K_CLUSTERS) -> tuple[str,
     ref = f"pca://{run_id}"
     _EMBEDDINGS[ref] = pts
     sizes = np.bincount(labels, minlength=k).tolist()
-    return ref, ds.n, sizes
+    return ref, n_pts, sizes
 
 
 def get_points(ref: str) -> bytes | None:

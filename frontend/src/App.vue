@@ -5,10 +5,12 @@ import PlanEditor from './agent/PlanEditor.vue'
 import ApprovalGate from './agent/ApprovalGate.vue'
 import DelegationTrace from './agent/DelegationTrace.vue'
 import TraceInspector from './agent/TraceInspector.vue'
+import DatasetUpload from './agent/DatasetUpload.vue'
 import { listPatterns } from './patterns/registry'
 import { useAgentRun } from './agent/useAgentRun'
 import { selection } from './agent/selection'
 import type { PlanStep } from './agent/events'
+import type { DatasetMeta } from './agent/datasets'
 
 const DEFAULT_GOAL = 'Find the structure in this customer dataset and tell me what the segments are.'
 
@@ -16,6 +18,7 @@ const run = useAgentRun()
 const { phase, traceId, trace, plan, gate, steps, errorMessage } = run
 
 const goalInput = ref(DEFAULT_GOAL)
+const dataset = ref<DatasetMeta | null>(null)
 const patterns = listPatterns()
 
 const isActive = computed(() =>
@@ -26,11 +29,17 @@ const isActive = computed(() =>
 
 function submit() {
   if (isActive.value) run.cancel()
-  else run.start(goalInput.value)
+  else run.start(goalInput.value, dataset.value?.datasetId)
 }
 
 function onApprovePlan(steps: PlanStep[]) {
   run.approvePlan(steps)
+}
+
+// Connecting a dataset immediately (re)starts a run analyzing it.
+function onUploaded(meta: DatasetMeta) {
+  dataset.value = meta
+  run.start(goalInput.value, meta.datasetId)
 }
 
 // Lasso → agent: turn the live selection into a follow-up run (skips planning).
@@ -39,7 +48,7 @@ function explainSelection() {
   if (!n) return
   const goal = `Explain what these ${n.toLocaleString()} selected points have in common.`
   goalInput.value = goal
-  run.start(goal)
+  run.start(goal, dataset.value?.datasetId)
 }
 
 // Auto-start one run so the editable plan is visible on load.
@@ -51,6 +60,8 @@ onMounted(() => run.start(goalInput.value))
     <header class="masthead">
       <h1>LatentLens <span>· agentic data-exploration console</span></h1>
       <p>Live SSE stream — the agent emits UI <em>intents</em> over the wire; the registry validates props and renders only vetted components.</p>
+
+      <DatasetUpload :meta="dataset" @uploaded="onUploaded" @cleared="dataset = null" />
 
       <form class="toolbar" @submit.prevent="submit">
         <input v-model="goalInput" type="text" placeholder="Describe a goal for the agent…" :disabled="isActive" />

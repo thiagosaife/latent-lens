@@ -121,3 +121,11 @@ def get_points(ref: str) -> bytes | None:
     """Binary Float32 buffer [x, y, cluster] * n for `GET /api/points`."""
     pts = _EMBEDDINGS.get(ref)
     return None if pts is None else pts.tobytes()
+
+
+def embedding_sizes(ref: str, k: int = K_CLUSTERS) -> list[int]:
+    """Per-cluster counts for a stored embedding (the 3rd column holds labels)."""
+    pts = _EMBEDDINGS.get(ref)
+    if pts is None:
+        return []
+    return np.bincount(pts[:, 2].astype(np.int64), minlength=k).tolist()

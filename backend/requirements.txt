@@ -6,3 +6,4 @@ anthropic
 numpy
 python-multipart   # file uploads (multipart/form-data)
 pyarrow            # Parquet parsing
+mcp                # analysis tools exposed over the Model Context Protocol

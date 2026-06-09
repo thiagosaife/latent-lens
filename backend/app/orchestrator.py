@@ -18,7 +18,7 @@ import time
 from collections.abc import AsyncIterator
 
 from . import datasets as ds_mod
-from . import llm, ml
+from . import llm, mcp_client, ml
 from .catalog import CATALOG, DEFAULT_PLAN, build_plan, catalog_meta
 from .events import sse
 from .runs import RUNS, RunState
@@ -45,14 +45,18 @@ def _fmt_rows(n: int | None) -> str:
 
 
 class Ctx:
-    """Accumulates results across steps (dataset → profile → embedding → sizes)."""
+    """Accumulates results across steps. The dataset is referenced by id so the
+    MCP tools (which own the analysis) can resolve it from the registry."""
 
-    def __init__(self, goal: str, dataset: ml.Dataset):
+    def __init__(self, goal: str, dataset_id: str):
         self.goal = goal
-        self.dataset = dataset
+        self.dataset_id = dataset_id
         self.profile: dict | None = None
+        self.clean: dict | None = None
         self.points_ref: str | None = None
+        self.point_count: int = 0
         self.sizes: list[int] = []
+        self.summary: dict | None = None
 
 
 async def run_stream(goal: str, dataset_id: str | None = None) -> AsyncIterator[str]:
@@ -78,8 +82,10 @@ async def run_stream(goal: str, dataset_id: str | None = None) -> AsyncIterator[
             edited = await state.plan_gate  # resolved by POST /api/runs/:id/plan
             if not state.cancelled:
                 ids = [s for s in (edited or DEFAULT_PLAN) if s in CATALOG] or DEFAULT_PLAN
-                dataset = ds_mod.get_dataset(dataset_id) or ml.generate_dataset()
-                ctx = Ctx(goal, dataset)
+                # Ensure a dataset id the MCP tools can resolve (register a
+                # synthetic one if the run didn't supply an uploaded dataset).
+                ctx_dataset_id = dataset_id or ds_mod.register(ml.generate_dataset())
+                ctx = Ctx(goal, ctx_dataset_id)
                 for sid in ids:
                     if state.cancelled:
                         break
@@ -126,6 +132,10 @@ async def _exec_step(sid: str, ctx: Ctx, state: RunState, run_id: str) -> AsyncI
             await asyncio.sleep(0.15)
             return
 
+    # Run the step's analysis over MCP — the tools own the real work; results
+    # land in ctx for the delegation trace and the UI intents below.
+    await _run_step_tool(sid, ctx, run_id)
+
     # Delegate to a specialist sub-agent (real, attributed tool calls).
     agent = c.get("delegate")
     if agent:
@@ -141,7 +151,7 @@ async def _exec_step(sid: str, ctx: Ctx, state: RunState, run_id: str) -> AsyncI
         await asyncio.sleep(0.25)
 
     # The step's real work → UI intents (validated by the frontend registry).
-    for intent in _intents_for(sid, ctx, run_id):
+    for intent in _intents_for(sid, ctx):
         yield sse({"type": "ui_intent", "stepId": sid, "intent": intent})
         await asyncio.sleep(0.45)
 
@@ -149,13 +159,31 @@ async def _exec_step(sid: str, ctx: Ctx, state: RunState, run_id: str) -> AsyncI
     await asyncio.sleep(0.2)
 
 
+async def _run_step_tool(sid: str, ctx: Ctx, run_id: str) -> None:
+    """Invoke the step's analysis tool over MCP and stash the result in ctx."""
+    if sid == "profile":
+        ctx.profile = await mcp_client.call("profile_dataset", dataset_id=ctx.dataset_id)
+    elif sid == "clean":
+        ctx.clean = await mcp_client.call("clean_dataset", dataset_id=ctx.dataset_id)
+    elif sid == "reduce":
+        r = await mcp_client.call("reduce_dimensions", run_id=run_id, dataset_id=ctx.dataset_id)
+        ctx.points_ref = r["pointsRef"]
+        ctx.point_count = r["pointCount"]
+        ctx.sizes = r["sizes"]
+    elif sid == "cluster":
+        if ctx.points_ref:
+            ctx.sizes = (await mcp_client.call("cluster_segments", points_ref=ctx.points_ref))["sizes"]
+    elif sid == "summarize":
+        ctx.summary = await mcp_client.call("summarize_segments", goal=ctx.goal, profile=ctx.profile or {}, sizes=ctx.sizes)
+
+
 def _tools_for(sid: str, ctx: Ctx) -> list[tuple[str, dict, str]]:
     if sid == "clean":
-        ds = ctx.dataset
+        cl = ctx.clean or {}
         return [
-            ("impute", {"strategy": "mean"}, f"{ds.missing_cells:,} cells imputed"),
-            ("drop_duplicates", {}, f"{ds.duplicates} duplicate rows"),
-            ("standardize", {"columns": len(ds.numeric_cols)}, f"{len(ds.numeric_cols)} numeric columns scaled"),
+            ("impute", {"strategy": "mean"}, f"{cl.get('missing_cells', 0):,} cells imputed"),
+            ("drop_duplicates", {}, f"{cl.get('duplicates', 0)} duplicate rows"),
+            ("standardize", {"columns": cl.get("numeric", 0)}, f"{cl.get('numeric', 0)} numeric columns scaled"),
         ]
     if sid == "cluster":
         k = len(ctx.sizes) or ml.K_CLUSTERS
@@ -166,22 +194,22 @@ def _tools_for(sid: str, ctx: Ctx) -> list[tuple[str, dict, str]]:
     return []
 
 
-def _intents_for(sid: str, ctx: Ctx, run_id: str) -> list[dict]:
+def _intents_for(sid: str, ctx: Ctx) -> list[dict]:
     if sid == "profile":
-        p = ml.profile_dataset(ctx.dataset)
-        ctx.profile = p
-        flagged = p["flagged_high_missing"][:4]
-        dup = p["duplicates"]
-        bullets = [f"{c} — {int(p['missing_by_col'][c] * 100)}% missing" for c in flagged]
+        p = ctx.profile or {}
+        flagged = p.get("flagged_high_missing", [])[:4]
+        dup = p.get("duplicates", 0)
+        miss_by = p.get("missing_by_col", {})
+        bullets = [f"{c} — {int(miss_by.get(c, 0) * 100)}% missing" for c in flagged]
         bullets.append(f"{dup:,} duplicate rows" if dup else "No duplicate rows")
         return [
-            {"component": "stat_tile", "props": {"label": "Rows profiled", "value": p["rows"]}},
-            {"component": "stat_tile", "props": {"label": "Missing cells", "value": p["missing_fraction"], "format": "percent"}},
+            {"component": "stat_tile", "props": {"label": "Rows profiled", "value": p.get("rows", 0)}},
+            {"component": "stat_tile", "props": {"label": "Missing cells", "value": p.get("missing_fraction", 0), "format": "percent"}},
             {
                 "component": "summary_card",
                 "props": {
                     "title": "Profiling complete",
-                    "body": f"{p['numeric']} numeric and {p['categorical']} categorical columns. "
+                    "body": f"{p.get('numeric', 0)} numeric and {p.get('categorical', 0)} categorical columns. "
                     f"{len(flagged)} columns exceed 30% missingness and are flagged for cleaning.",
                     "bullets": bullets,
                     "tone": "positive",
@@ -190,29 +218,24 @@ def _intents_for(sid: str, ctx: Ctx, run_id: str) -> list[dict]:
         ]
 
     if sid == "clean":
-        ds = ctx.dataset
+        cl = ctx.clean or {}
+        miss, dup, num = cl.get("missing_cells", 0), cl.get("duplicates", 0), cl.get("numeric", 0)
         return [
             {
                 "component": "summary_card",
                 "props": {
                     "title": "Cleaning complete",
-                    "body": f"Imputed {ds.missing_cells:,} missing cells, removed {ds.duplicates} duplicate rows, "
-                    f"and standardized {len(ds.numeric_cols)} numeric columns.",
-                    "bullets": [
-                        f"{ds.missing_cells:,} cells imputed",
-                        f"{ds.duplicates} duplicate rows removed",
-                        f"{len(ds.numeric_cols)} columns standardized",
-                    ],
+                    "body": f"Imputed {miss:,} missing cells, removed {dup} duplicate rows, and standardized {num} numeric columns.",
+                    "bullets": [f"{miss:,} cells imputed", f"{dup} duplicate rows removed", f"{num} columns standardized"],
                     "tone": "neutral",
                 },
             }
         ]
 
     if sid == "reduce":
-        ref, n, sizes = ml.build_embedding(run_id, ctx.dataset)
-        ctx.points_ref = ref
-        ctx.sizes = sizes
-        return [{"component": "embedding_scatter", "props": {"pointsRef": ref, "colorBy": "cluster", "pointCount": n}}]
+        if not ctx.points_ref:
+            return []
+        return [{"component": "embedding_scatter", "props": {"pointsRef": ctx.points_ref, "colorBy": "cluster", "pointCount": ctx.point_count}}]
 
     if sid == "cluster":
         sizes = ctx.sizes
@@ -231,8 +254,7 @@ def _intents_for(sid: str, ctx: Ctx, run_id: str) -> list[dict]:
         ]
 
     if sid == "summarize":
-        props = llm.generate_segment_summary(ctx.goal, ctx.profile or {}, ctx.sizes)
-        return [{"component": "summary_card", "props": props}]
+        return [{"component": "summary_card", "props": ctx.summary}] if ctx.summary else []
 
     return []
 

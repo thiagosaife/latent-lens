@@ -11,6 +11,7 @@ Drop-in replacement for the Node mock on :8787 — same endpoints, same events.
 from __future__ import annotations
 
 import logging
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, File, HTTPException, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
@@ -19,12 +20,22 @@ from pydantic import BaseModel
 
 from . import VERSION, ml
 from . import datasets as ds_mod
+from . import mcp_client
 from .orchestrator import run_stream
 from .runs import RUNS
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 
-app = FastAPI(title="LatentLens backend", version=VERSION)
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Open the in-process MCP session (analysis tools) for the app's lifetime.
+    await mcp_client.startup()
+    yield
+    await mcp_client.shutdown()
+
+
+app = FastAPI(title="LatentLens backend", version=VERSION, lifespan=lifespan)
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
 SSE_HEADERS = {"Cache-Control": "no-cache, no-transform", "Connection": "keep-alive", "X-Accel-Buffering": "no"}

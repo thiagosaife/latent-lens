@@ -1,4 +1,5 @@
 import { parseAgentEvent, type AgentEvent } from './events'
+import { authHeaders } from './http'
 
 export interface StreamHandlers {
   onEvent: (event: AgentEvent) => void
@@ -29,7 +30,7 @@ export async function streamRun(
   try {
     res = await fetch(url, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', Accept: 'text/event-stream' },
+      headers: { 'Content-Type': 'application/json', Accept: 'text/event-stream', ...authHeaders() },
       body: JSON.stringify({ goal }),
       signal: opts.signal,
     })
@@ -97,7 +98,7 @@ function isAbort(err: unknown): boolean {
 export async function sendCommand(path: string, body: unknown): Promise<void> {
   await fetch(path, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
     body: JSON.stringify(body),
   })
 }

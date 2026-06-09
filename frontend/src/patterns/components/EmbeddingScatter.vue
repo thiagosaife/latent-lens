@@ -2,6 +2,7 @@
 import { onMounted, onBeforeUnmount, ref, watch, computed } from 'vue'
 import createScatterplot from 'regl-scatterplot'
 import { setSelection, clearSelection } from '../../agent/selection'
+import { authHeaders } from '../../agent/http'
 
 /**
  * HERO — the interactive embedding explorer. WebGL via regl-scatterplot so it
@@ -57,7 +58,7 @@ const selStats = computed(() => {
 
 async function loadPoints(): Promise<{ x: Float32Array; y: Float32Array; z: Float32Array }> {
   const n = props.pointCount ?? 50000
-  const res = await fetch(`/api/points?ref=${encodeURIComponent(props.pointsRef)}&n=${n}`)
+  const res = await fetch(`/api/points?ref=${encodeURIComponent(props.pointsRef)}&n=${n}`, { headers: authHeaders() })
   if (!res.ok) throw new Error(`points fetch failed: HTTP ${res.status}`)
   const buf = await res.arrayBuffer()
   const f = new Float32Array(buf) // interleaved [x, y, cluster] * count

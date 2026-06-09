@@ -12,8 +12,24 @@
 // Run:  npm run mock   (Vite dev-proxies /api → here)
 
 import { createServer } from 'node:http'
+import { performance } from 'node:perf_hooks'
+import {
+  VERSION,
+  loadConfig,
+  createLogger,
+  createRateLimiter,
+  createAlerter,
+  clientKey,
+  bearer,
+} from './hardening.mjs'
 
-const PORT = process.env.MOCK_PORT ? Number(process.env.MOCK_PORT) : 8787
+const cfg = loadConfig()
+const PORT = cfg.port
+const log = createLogger({ pretty: cfg.logPretty })
+const rateLimit = createRateLimiter(cfg.rateLimitPerMin)
+const alert = createAlerter(log, { slowMs: cfg.slowMs, errorSpike: cfg.errorSpike })
+const startedAt = Date.now()
+
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 const deferred = () => {
   let resolve
@@ -211,9 +227,10 @@ async function execStep(send, reg, step, isOpen) {
   return 'next'
 }
 
-async function streamRun(res, goal, runId) {
+async function streamRun(res, goal, runId, traceId) {
   const reg = { planGate: deferred(), decisionGates: new Map(), cancelled: false }
   runs.set(runId, reg)
+  const t0 = Date.now()
 
   let open = true
   const isOpen = () => open && !reg.cancelled
@@ -226,7 +243,7 @@ async function streamRun(res, goal, runId) {
     for (const g of reg.decisionGates.values()) g.resolve('cancel')
   })
 
-  const traceId = 'trace_' + Math.random().toString(36).slice(2, 10)
+  log('info', { msg: 'run.start', runId, traceId, goal })
   send({ type: 'run_started', runId, goal, traceId })
   await delay(250)
 
@@ -253,6 +270,7 @@ async function streamRun(res, goal, runId) {
     res.end()
   }
   runs.delete(runId)
+  log('info', { msg: 'run.finish', runId, traceId, duration_ms: Date.now() - t0, outcome: reg.cancelled ? 'cancelled' : 'completed' })
 }
 
 function readBody(req, done) {
@@ -315,9 +333,22 @@ function generatePoints(ref, n) {
 }
 
 const server = createServer((req, res) => {
+  const startT = performance.now()
+  const url = new URL(req.url ?? '/', `http://localhost:${PORT}`)
+  const path = url.pathname
+  let isStream = false
+  let traceId
+
+  // Structured access log + alerting, once the response completes.
+  res.on('finish', () => {
+    const latencyMs = performance.now() - startT
+    log('info', { msg: 'request', method: req.method, path, status: res.statusCode, latency_ms: Math.round(latencyMs), key: clientKey(req, bearer(req)), stream: isStream || undefined })
+    alert({ method: req.method, path, status: res.statusCode, latencyMs, isStream, traceId })
+  })
+
   res.setHeader('Access-Control-Allow-Origin', '*')
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type')
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization')
 
   if (req.method === 'OPTIONS') {
     res.writeHead(204)
@@ -325,8 +356,32 @@ const server = createServer((req, res) => {
     return
   }
 
-  const url = new URL(req.url ?? '/', `http://localhost:${PORT}`)
-  const path = url.pathname
+  // Health check — no auth, no rate limit. Remediation for the stale-server
+  // incident (POSTMORTEM.md): callers can assert which build they're hitting.
+  if (req.method === 'GET' && path === '/health') {
+    res.writeHead(200, { 'Content-Type': 'application/json' })
+    res.end(JSON.stringify({ status: 'ok', version: VERSION, uptime_s: Math.round((Date.now() - startedAt) / 1000), activeRuns: runs.size }))
+    return
+  }
+
+  // Rate limiting (per token, else per IP).
+  const token = bearer(req)
+  const rl = rateLimit(clientKey(req, token))
+  res.setHeader('X-RateLimit-Limit', String(rl.limit))
+  res.setHeader('X-RateLimit-Remaining', String(rl.remaining))
+  if (!rl.ok) {
+    res.writeHead(429, { 'Content-Type': 'application/json', 'Retry-After': String(rl.retryAfter) })
+    res.end(JSON.stringify({ error: 'rate_limited', retryAfter: rl.retryAfter }))
+    return
+  }
+
+  // Bearer auth — only enforced when API_TOKEN is configured (off by default so
+  // the demo runs unchanged; the control exists and is exercised in tests).
+  if (cfg.apiToken && path.startsWith('/api/') && token !== cfg.apiToken) {
+    res.writeHead(401, { 'Content-Type': 'application/json', 'WWW-Authenticate': 'Bearer' })
+    res.end(JSON.stringify({ error: 'unauthorized' }))
+    return
+  }
 
   // Embedding points by reference, as a binary Float32 buffer.
   if (req.method === 'GET' && path === '/api/points') {
@@ -370,18 +425,20 @@ const server = createServer((req, res) => {
     return
   }
 
-  // Start a run.
+  // Start a run (long-lived SSE stream).
   if (req.method === 'POST' && path === '/api/runs') {
+    isStream = true
     readBody(req, (json) => {
       const goal = typeof json.goal === 'string' && json.goal.trim() ? json.goal.trim() : 'Explore this dataset.'
       const runId = 'run_' + Math.random().toString(36).slice(2, 8)
+      traceId = 'trace_' + Math.random().toString(36).slice(2, 10)
       res.writeHead(200, {
         'Content-Type': 'text/event-stream',
         'Cache-Control': 'no-cache, no-transform',
         Connection: 'keep-alive',
       })
       res.flushHeaders?.()
-      streamRun(res, goal, runId)
+      streamRun(res, goal, runId, traceId)
     })
     return
   }
@@ -390,6 +447,23 @@ const server = createServer((req, res) => {
   res.end(JSON.stringify({ error: 'not found' }))
 })
 
-server.listen(PORT, () => {
-  console.log(`[mock] agent SSE server on http://localhost:${PORT}  (plan-and-execute, HITL)`)
+// Fail loud and clear on a port clash — the stale-server incident (POSTMORTEM.md).
+server.on('error', (err) => {
+  if (err.code === 'EADDRINUSE') {
+    log('error', { msg: 'port_in_use', port: PORT, hint: 'another mock instance is running — pkill -f agent-server.mjs' })
+    process.exit(1)
+  }
+  throw err
 })
+
+server.listen(PORT, () => {
+  log('info', { msg: 'server.start', version: VERSION, port: PORT, auth: cfg.apiToken ? 'required' : 'disabled', rate_limit_per_min: cfg.rateLimitPerMin })
+})
+
+function shutdown(signal) {
+  log('info', { msg: 'server.stop', signal })
+  server.close(() => process.exit(0))
+  setTimeout(() => process.exit(0), 1000).unref()
+}
+process.on('SIGINT', () => shutdown('SIGINT'))
+process.on('SIGTERM', () => shutdown('SIGTERM'))

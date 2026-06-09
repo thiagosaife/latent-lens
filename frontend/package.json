@@ -7,6 +7,7 @@
     "dev": "vite",
     "mock": "node mock/agent-server.mjs",
     "dev:all": "node scripts/dev-all.mjs",
+    "dev:api": "node scripts/dev-all-api.mjs",
     "verify:browser": "node e2e/verify.mjs",
     "build": "vue-tsc -b && vite build",
     "preview": "vite preview"

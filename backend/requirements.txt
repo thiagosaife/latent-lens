@@ -1,0 +1,7 @@
+# Real backend for LatentLens — FastAPI + Claude + numpy-only ML.
+# numpy-only (PCA via SVD, k-means, profiling) keeps native-wheel risk low on
+# new Python versions; swap in scikit-learn / umap-learn later if desired.
+fastapi
+uvicorn
+anthropic
+numpy

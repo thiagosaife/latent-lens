@@ -129,3 +129,15 @@ def embedding_sizes(ref: str, k: int = K_CLUSTERS) -> list[int]:
     if pts is None:
         return []
     return np.bincount(pts[:, 2].astype(np.int64), minlength=k).tolist()
+
+
+def run_kmeans_on(ref: str, k: int = K_CLUSTERS) -> list[int]:
+    """Run k-means over a stored embedding's 2D coordinates → per-cluster sizes.
+
+    A genuine clustering pass (not a read-back of the colors computed at reduce
+    time) — same coords + seed, so it's deterministic and consistent."""
+    pts = _EMBEDDINGS.get(ref)
+    if pts is None:
+        return []
+    labels = _kmeans(pts[:, :2], k)
+    return np.bincount(labels, minlength=k).tolist()

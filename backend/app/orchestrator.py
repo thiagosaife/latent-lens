@@ -131,22 +131,20 @@ async def _work_node(state: GraphState) -> dict:
         await asyncio.sleep(0.15)
         return {"idx": nxt, "decision": None}
 
-    updates = await _run_step_tool(sid, state)
-    merged: dict[str, Any] = {**state, **updates}
-
     agent = c.get("delegate")
     if agent:
+        # Real delegation: the specialist sub-agent actually invokes MCP tools and
+        # the trace shows those real calls (real args, real results) — and their
+        # returns ARE the step's result, not a separate mock-up.
         w({"type": "delegation_started", "stepId": sid, "agent": agent})
         await asyncio.sleep(0.3)
-        for i, (tool, args, result) in enumerate(_tools_for(sid, merged)):
-            cid = f"{sid}-{i}"
-            w({"type": "tool_call_started", "stepId": sid, "agent": agent, "callId": cid, "tool": tool, "args": args})
-            await asyncio.sleep(0.5)
-            w({"type": "tool_call_finished", "stepId": sid, "callId": cid, "result": result})
-            await asyncio.sleep(0.2)
+        updates = await _run_delegated(sid, state, w, agent)
         w({"type": "delegation_finished", "stepId": sid, "agent": agent})
         await asyncio.sleep(0.25)
+    else:
+        updates = await _run_step_tool(sid, state)
 
+    merged: dict[str, Any] = {**state, **updates}
     for intent in _intents_for(sid, merged):
         w({"type": "ui_intent", "stepId": sid, "intent": intent})
         await asyncio.sleep(0.45)
@@ -208,21 +206,41 @@ async def _run_step_tool(sid: str, state: GraphState) -> dict:
     return {}
 
 
-def _tools_for(sid: str, st: dict) -> list[tuple[str, dict, str]]:
+async def _traced_call(w, sid: str, agent: str, tool: str, args: dict, summarize) -> dict:
+    """Make a REAL MCP tool call, bracketed by trace events carrying the actual
+    args and a one-line summary of the actual result."""
+    cid = f"{sid}-{tool}"
+    w({"type": "tool_call_started", "stepId": sid, "agent": agent, "callId": cid, "tool": tool, "args": args})
+    await asyncio.sleep(0.4)  # pace the trace animation; the in-process call itself is sub-ms
+    result = await mcp_client.call(tool, **args)
+    w({"type": "tool_call_finished", "stepId": sid, "callId": cid, "result": summarize(result)})
+    await asyncio.sleep(0.2)
+    return result
+
+
+async def _run_delegated(sid: str, state: GraphState, w, agent: str) -> dict:
+    """Run a delegated step as a sequence of real MCP tool calls; the tools'
+    actual returns become the step's result."""
+    did = state["dataset_id"]
     if sid == "clean":
-        cl = st.get("clean") or {}
-        return [
-            ("impute", {"strategy": "mean"}, f"{cl.get('missing_cells', 0):,} cells imputed"),
-            ("drop_duplicates", {}, f"{cl.get('duplicates', 0)} duplicate rows"),
-            ("standardize", {"columns": cl.get("numeric", 0)}, f"{cl.get('numeric', 0)} numeric columns scaled"),
-        ]
+        imp = await _traced_call(w, sid, agent, "impute_missing", {"dataset_id": did, "strategy": "mean"},
+                                 lambda r: f"{r['imputed_cells']:,} cells imputed")
+        dup = await _traced_call(w, sid, agent, "drop_duplicates", {"dataset_id": did},
+                                 lambda r: f"{r['removed']} duplicate rows removed")
+        std = await _traced_call(w, sid, agent, "standardize_columns", {"dataset_id": did},
+                                 lambda r: f"{r['columns']} numeric columns scaled")
+        return {"clean": {"missing_cells": imp["imputed_cells"], "duplicates": dup["removed"], "numeric": std["columns"]}}
     if sid == "cluster":
-        k = len(st.get("sizes") or []) or ml.K_CLUSTERS
-        return [
-            ("run_kmeans", {"k": k, "metric": "euclidean"}, f"{k} clusters"),
-            ("label_segments", {"method": "centroid_features"}, f"{k} labels assigned"),
-        ]
-    return []
+        ref = state.get("points_ref")
+        if not ref:  # cluster reordered before reduce → nothing to segment
+            return {}
+        k = len(state.get("sizes") or []) or ml.K_CLUSTERS
+        km = await _traced_call(w, sid, agent, "run_kmeans", {"points_ref": ref, "k": k},
+                                lambda r: f"{len(r['sizes'])} clusters · sizes {r['sizes']}")
+        await _traced_call(w, sid, agent, "label_segments", {"points_ref": ref},
+                           lambda r: f"{r['segments']} segments labeled")
+        return {"sizes": km["sizes"]}
+    return {}
 
 
 def _intents_for(sid: str, st: dict) -> list[dict]:

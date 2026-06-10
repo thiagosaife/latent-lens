@@ -21,7 +21,7 @@ from pydantic import BaseModel
 from . import VERSION, ml
 from . import datasets as ds_mod
 from . import mcp_client
-from .orchestrator import run_stream
+from .orchestrator import start_run
 from .runs import RUNS
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
@@ -80,7 +80,36 @@ async def upload_dataset(file: UploadFile = File(...)) -> dict:
 @app.post("/api/runs")
 async def create_run(body: RunBody) -> StreamingResponse:
     goal = (body.goal or "").strip() or "Explore this dataset."
-    return StreamingResponse(run_stream(goal, body.datasetId), media_type="text/event-stream", headers=SSE_HEADERS)
+    state = start_run(goal, body.datasetId)
+    return StreamingResponse(state.subscribe(), media_type="text/event-stream", headers=SSE_HEADERS)
+
+
+@app.get("/api/runs/{run_id}/stream")
+async def resume_run(run_id: str, after: int = 0):
+    """Reconnect to a still-running (or just-finished) run and replay everything
+    after sequence `after` — the resume-on-dropped-stream path. 404 once the run
+    has been reaped, which the client treats as 'gone, give up'."""
+    state = RUNS.get(run_id)
+    if state is None:
+        return Response(status_code=404)
+    return StreamingResponse(state.subscribe(after), media_type="text/event-stream", headers=SSE_HEADERS)
+
+
+@app.post("/api/runs/{run_id}/cancel", status_code=204)
+async def cancel_run(run_id: str) -> Response:
+    """Intentional stop (vs. an accidental drop): tear the run down server-side so
+    it doesn't keep computing in the background. Resolves any held gate so the
+    producer loop unwinds."""
+    state = RUNS.get(run_id)
+    if state is None:
+        return Response(status_code=404)
+    state.cancelled = True
+    if not state.plan_gate.done():
+        state.plan_gate.set_result([])
+    for fut in list(state.decision_gates.values()):
+        if not fut.done():
+            fut.set_result("cancel")
+    return Response(status_code=204)
 
 
 @app.post("/api/runs/{run_id}/plan", status_code=204)

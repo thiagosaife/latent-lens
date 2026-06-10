@@ -9,7 +9,7 @@
 //   ERROR_SPIKE          5xx count within 60s that fires an alert (default 5)
 //   LOG_PRETTY=1         human-readable logs instead of JSON lines
 
-export const VERSION = '0.6.0'
+export const VERSION = '0.7.0' // + SSE heartbeats on gate-held streams
 
 export function loadConfig(env = process.env) {
   const num = (v, d) => (v ? Number(v) : d)

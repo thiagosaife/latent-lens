@@ -29,6 +29,8 @@ const log = createLogger({ pretty: cfg.logPretty })
 const rateLimit = createRateLimiter(cfg.rateLimitPerMin)
 const alert = createAlerter(log, { slowMs: cfg.slowMs, errorSpike: cfg.errorSpike })
 const startedAt = Date.now()
+// Idle-connection heartbeat interval (keeps gate-held SSE streams alive).
+const HEARTBEAT_MS = Number(process.env.HEARTBEAT_MS) || 15000
 
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 const deferred = () => {
@@ -236,9 +238,17 @@ async function streamRun(res, goal, runId, traceId) {
   const isOpen = () => open && !reg.cancelled
   const send = (event) => { if (open) res.write(`data: ${JSON.stringify(event)}\n\n`) }
 
+  // Heartbeat: keep an idle connection (held at a gate) alive past proxy/browser
+  // idle timeouts. Comment frames carry no `data:` line, so the client ignores
+  // them. (The real backend does this per-subscriber; the mock keeps it simple.)
+  const heartbeat = setInterval(() => { if (open) res.write(': hb\n\n') }, HEARTBEAT_MS)
+  heartbeat.unref?.()
+  const stopHeartbeat = () => clearInterval(heartbeat)
+
   res.on('close', () => {
     open = false
     reg.cancelled = true
+    stopHeartbeat()
     reg.planGate.resolve(null) // unblock any pending awaits
     for (const g of reg.decisionGates.values()) g.resolve('cancel')
   })
@@ -265,6 +275,7 @@ async function streamRun(res, goal, runId, traceId) {
     }
   }
 
+  stopHeartbeat()
   if (open) {
     send({ type: 'run_finished', runId })
     res.end()

@@ -17,10 +17,10 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import re
 import secrets
 import time
-from collections.abc import AsyncIterator
 from typing import Any, TypedDict
 
 from langgraph.checkpoint.memory import MemorySaver
@@ -31,11 +31,13 @@ from langgraph.types import Command, interrupt
 from . import datasets as ds_mod
 from . import llm, mcp_client, ml
 from .catalog import CATALOG, build_plan, catalog_meta
-from .events import sse
-from .runs import RUNS, RunState
+from .runs import RESUME_TTL_S, RUNS, RunState
 
 log = logging.getLogger("latentlens.run")
 _FOLLOW_UP = ("selected points", "in common")
+# Bound a gate wait so an abandoned run (held at a gate, no one ever answers and
+# no client reconnects) can't leak the background task forever.
+GATE_TTL_S = float(os.environ.get("LATENTLENS_GATE_TTL_S", "600"))
 
 
 def _newid(prefix: str) -> str:
@@ -289,43 +291,68 @@ def _intents_for(sid: str, st: dict) -> list[dict]:
     return []
 
 
-# ── SSE bridge: drive the graph, surface interrupts, resume ──────────────────
+# ── Run lifecycle: a background task produces; HTTP responses subscribe ───────
 
-async def run_stream(goal: str, dataset_id: str | None = None) -> AsyncIterator[str]:
+def start_run(goal: str, dataset_id: str | None = None) -> RunState:
+    """Set up a run and start driving it in the background, returning its state.
+
+    The HTTP response streams `state.subscribe()` — so execution is decoupled
+    from any one connection: a dropped client can reconnect (GET the run's stream
+    with `after=<last seq>`) and replay what it missed, even mid-gate."""
     run_id, trace_id = _newid("run_"), _newid("trace_")
     loop = asyncio.get_running_loop()
     state = RunState(run_id=run_id, trace_id=trace_id, plan_gate=loop.create_future())
     RUNS[run_id] = state
+    asyncio.create_task(_drive(state, goal, dataset_id))
+    return state
+
+
+async def _await_gate(state: RunState, fut: asyncio.Future) -> Any:
+    """Await a gate decision, bounded so an abandoned run can't leak forever. On
+    timeout the run is marked cancelled (the resume POSTs guard with `not done()`,
+    so a late answer is harmlessly ignored)."""
+    try:
+        return await asyncio.wait_for(fut, timeout=GATE_TTL_S)
+    except asyncio.TimeoutError:
+        log.info(json.dumps({"msg": "run.gate_timeout", "runId": state.run_id}))
+        state.cancelled = True
+        return None
+
+
+async def _drive(state: RunState, goal: str, dataset_id: str | None) -> None:
+    """Produce the run's event stream into the resumable buffer (not an HTTP
+    response). Survives subscriber disconnects; emits an `error` frame on failure
+    so subscribers never hang, and always `finish()`es."""
+    run_id, trace_id = state.run_id, state.trace_id
     t0 = time.time()
     log.info(json.dumps({"msg": "run.start", "runId": run_id, "traceId": trace_id, "goal": goal}))
-
     try:
-        yield sse({"type": "run_started", "runId": run_id, "goal": goal, "traceId": trace_id})
+        state.emit({"type": "run_started", "runId": run_id, "goal": goal, "traceId": trace_id})
         await asyncio.sleep(0.25)
 
         if _is_follow_up(goal):
-            async for frame in _exec_explain(goal):
-                yield frame
+            await _exec_explain(state, goal)
         else:
+            loop = asyncio.get_running_loop()
             ds_id = dataset_id or ds_mod.register(ml.generate_dataset())
             config = {"configurable": {"thread_id": run_id}}
             inp: Any = {"goal": goal, "dataset_id": ds_id, "run_id": run_id}
 
             while True:
                 async for ev in _graph.astream(inp, config, stream_mode="custom"):
-                    yield sse(ev)
+                    state.emit(ev)
                 snap = await _graph.aget_state(config)
                 if not snap.interrupts:
                     break
                 payload = snap.interrupts[0].value
                 if payload["event"] == "plan_proposed":
-                    yield sse({"type": "plan_proposed", "runId": run_id, "steps": payload["steps"]})
-                    ids = await state.plan_gate
+                    state.emit({"type": "plan_proposed", "runId": run_id, "steps": payload["steps"]})
+                    ids = await _await_gate(state, state.plan_gate)
                     if state.cancelled:
                         break
                     inp = Command(resume=ids)
                 else:  # approval_required
-                    yield sse(
+                    state.emit(
                         {
                             "type": "approval_required",
                             "stepId": payload["stepId"],
@@ -337,28 +364,39 @@ async def run_stream(goal: str, dataset_id: str | None = None) -> AsyncIterator[
                     fut = loop.create_future()
                     state.decision_gates[payload["stepId"]] = fut
                     try:
-                        decision = await fut
+                        decision = await _await_gate(state, fut)
                     finally:
                         state.decision_gates.pop(payload["stepId"], None)
-                    if decision == "cancel":
+                    if state.cancelled or decision == "cancel":
                         state.cancelled = True
                         break
                     inp = Command(resume=decision)
 
         if not state.cancelled:
-            yield sse({"type": "run_finished", "runId": run_id})
+            state.emit({"type": "run_finished", "runId": run_id})
+    except Exception as e:  # surface as an error frame so subscribers don't hang
+        log.exception("run failed")
+        state.emit({"type": "error", "message": str(e)})
     finally:
-        RUNS.pop(run_id, None)
+        state.finish()
         outcome = "cancelled" if state.cancelled else "completed"
         log.info(json.dumps({"msg": "run.finish", "runId": run_id, "traceId": trace_id, "duration_ms": int((time.time() - t0) * 1000), "outcome": outcome}))
+        asyncio.create_task(_reap(run_id))
 
 
-async def _exec_explain(goal: str) -> AsyncIterator[str]:
+async def _reap(run_id: str) -> None:
+    """Drop a finished run's buffer after a grace period — late reconnects still
+    replay the tail, but memory doesn't grow unbounded."""
+    await asyncio.sleep(RESUME_TTL_S)
+    RUNS.pop(run_id, None)
+
+
+async def _exec_explain(state: RunState, goal: str) -> None:
     """Lasso → 'explain these points' follow-up: no plan phase, direct execution."""
     sid = "explain"
     m = re.search(r"(\d[\d,]*)", goal)
     count = int(m.group(1).replace(",", "")) if m else 0
-    yield sse({"type": "step_started", "stepId": sid, "title": "Explain selection"})
+    state.emit({"type": "step_started", "stepId": sid, "title": "Explain selection"})
     await asyncio.sleep(0.4)
     intents = [
         {"component": "summary_card", "props": llm.generate_explain_summary(goal, count)},
@@ -366,7 +404,7 @@ async def _exec_explain(goal: str) -> AsyncIterator[str]:
         {"component": "stat_tile", "props": {"label": "Avg recency", "value": 0.82, "format": "percent", "delta": 0.14}},
     ]
     for intent in intents:
-        yield sse({"type": "ui_intent", "stepId": sid, "intent": intent})
+        state.emit({"type": "ui_intent", "stepId": sid, "intent": intent})
         await asyncio.sleep(0.45)
-    yield sse({"type": "step_finished", "stepId": sid})
+    state.emit({"type": "step_finished", "stepId": sid})
     await asyncio.sleep(0.2)

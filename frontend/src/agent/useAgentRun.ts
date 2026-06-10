@@ -292,6 +292,9 @@ export function useAgentRun() {
   }
 
   function stop(): void {
+    // Intentional stop (vs. a network drop, which the transport auto-resumes):
+    // tell the server to tear the decoupled run down, then abort our read.
+    if (runId.value) void sendCommand(`/api/runs/${runId.value}/cancel`, {})
     controller?.abort()
     controller = null
   }

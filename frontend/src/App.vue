@@ -43,12 +43,14 @@ function onUploaded(meta: DatasetMeta) {
 }
 
 // Lasso → agent: turn the live selection into a follow-up run (skips planning).
+// Send the REAL cluster composition so the agent explains the actual region.
 function explainSelection() {
   const n = selection.count
   if (!n) return
   const goal = `Explain what these ${n.toLocaleString()} selected points have in common.`
   goalInput.value = goal
-  run.start(goal, dataset.value?.datasetId)
+  const sel = { count: n, clusters: selection.clusters.map((c) => ({ cluster: c.cluster, count: c.count })) }
+  run.start(goal, dataset.value?.datasetId, sel)
 }
 
 // Auto-start one run so the editable plan is visible on load.

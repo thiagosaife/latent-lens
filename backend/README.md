@@ -7,8 +7,10 @@ The orchestration is a **LangGraph** plan-and-execute `StateGraph` with the
 plan-approval and per-step approval gates as first-class `interrupt()`s. Analysis
 runs over **MCP** tools (FastMCP, connected in-process). The work is real: numpy
 profiling, PCA (SVD) + k-means over a 50k-row synthetic dataset *or your uploaded
-CSV/Parquet*, a Claude-generated plan, and a Claude-generated summary card — each
-with a deterministic offline fallback so it runs fully without a key.
+CSV/Parquet*, an LLM-generated plan, and an LLM-generated summary card — each with
+a deterministic offline fallback so it runs fully without a key. The LLM is
+**provider-agnostic** (Anthropic / OpenAI / Gemini / any OpenAI-compatible
+endpoint) — see [`app/providers.py`](app/providers.py).
 
 See [`app/orchestrator.py`](app/orchestrator.py) for the graph and the SSE bridge;
 [`../README.md`](../README.md) for the whole-project writeup.
@@ -20,14 +22,18 @@ cd backend
 python3 -m venv .venv
 .venv/bin/pip install -r requirements.txt
 
-# optional: enable live Claude (planner + summaries). Without a key the app
-# uses deterministic fallbacks and still runs fully.
-cp .env.example .env      # then put YOUR Anthropic API key in .env
+# optional: enable live generation (planner + summaries) with ANY provider.
+# Without a key the app uses deterministic fallbacks and still runs fully.
+cp .env.example .env      # then add ONE provider key (see below)
 ```
 
-`.env` is gitignored — each tester supplies their own key. Get one at
-<https://console.anthropic.com/> (the account needs a non-zero credit balance,
-or calls return `400 credit balance too low` and the app falls back).
+`.env` is gitignored — each tester supplies their own key. Set exactly one of
+`ANTHROPIC_API_KEY` / `OPENAI_API_KEY` / `GEMINI_API_KEY` and the provider is
+auto-detected; override with `LLM_PROVIDER` / `LLM_MODEL` / `LLM_BASE_URL`. A
+`LLM_BASE_URL` points the OpenAI-compatible adapter at Azure / Groq / OpenRouter /
+Mistral / DeepSeek / Ollama / a local model. SDKs are lazy-imported, so you only
+need the one for your chosen provider. (If a key's account is unfunded or the
+model id is wrong, the call fails and the app falls back — no crash.)
 
 ## Run
 
@@ -91,13 +97,20 @@ treats as "run gone, stop retrying".)
   segmentation-agent calls `run_kmeans`/`label_segments`. The delegation trace is
   those genuine calls (real args, real results), not an illustrative mock-up, and
   their returns ARE the step's result.
-- **Claude (wired, needs a key):** two places. `generate_plan` decomposes the
-  goal into an ordered plan, enum-constrained to the step catalog; the
-  `summarize` step writes the `summary_card` props — both via
-  `claude-opus-4-8` structured outputs (the "constrained generation surface" made
-  real). Without `ANTHROPIC_API_KEY` (or with a $0-balance account) each falls
-  back to deterministic, goal-aware logic, so the pipeline runs fully offline.
-  Set the key to light up real generation.
+- **LLM (wired, any provider, needs a key):** `generate_plan` decomposes the goal
+  into an ordered plan (enum-constrained to the step catalog), and **every
+  `summary_card`** — profiling, cleaning, clustering, the final segment summary,
+  and the lasso "explain" follow-up — has its prose written by the model under the
+  provider's **structured outputs** (the "constrained generation surface" made
+  real; stat tiles and the embedding stay pure data). The provider is pluggable —
+  Anthropic, OpenAI, Gemini, or any OpenAI-compatible endpoint (`app/providers.py`);
+  each output is re-validated with `jsonschema`. Without a key (or on any error —
+  rate limit, unfunded account, wrong model id) each card falls back to a
+  deterministic template, so the pipeline runs fully offline.
+- **Approval-gate estimate (real):** the gate's rows/time are computed from the
+  actual dataset; the cost is a model-aware estimate of the run's LLM spend
+  (`app/pricing.py`) — the heavy compute is local numpy ($0), so the real cost is
+  the planner + card generation calls in the approved plan. Offline → `$0.00 (local)`.
 
 ## Next (not yet built)
 

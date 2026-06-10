@@ -229,7 +229,7 @@ export function useAgentRun() {
     }
   }
 
-  async function start(nextGoal: string, datasetId?: string): Promise<void> {
+  async function start(nextGoal: string, datasetId?: string, selection?: unknown): Promise<void> {
     if (phase.value === 'planning' || phase.value === 'awaiting_plan' || phase.value === 'executing' || phase.value === 'awaiting_approval') {
       stop()
     }
@@ -259,7 +259,7 @@ export function useAgentRun() {
           phase.value = 'error'
         },
       },
-      { signal: controller.signal, datasetId },
+      { signal: controller.signal, datasetId, selection },
     )
     controller = null
     // Stream closed without an explicit terminal event → treat as done.

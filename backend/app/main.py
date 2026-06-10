@@ -44,6 +44,7 @@ SSE_HEADERS = {"Cache-Control": "no-cache, no-transform", "Connection": "keep-al
 class RunBody(BaseModel):
     goal: str | None = None
     datasetId: str | None = None
+    selection: dict | None = None  # lasso composition for the explain follow-up: {count, clusters:[{cluster,count}]}
 
 
 class StepRef(BaseModel):
@@ -80,7 +81,7 @@ async def upload_dataset(file: UploadFile = File(...)) -> dict:
 @app.post("/api/runs")
 async def create_run(body: RunBody) -> StreamingResponse:
     goal = (body.goal or "").strip() or "Explore this dataset."
-    state = start_run(goal, body.datasetId)
+    state = start_run(goal, body.datasetId, body.selection)
     return StreamingResponse(state.subscribe(), media_type="text/event-stream", headers=SSE_HEADERS)
 
 

@@ -1,11 +1,17 @@
-# Real backend for LatentLens — FastAPI + Claude + numpy ML.
+# Real backend for LatentLens — FastAPI + a pluggable LLM + numpy ML.
 # numpy-only math (PCA via SVD, k-means, profiling) keeps native-wheel risk low.
 fastapi
 uvicorn
-anthropic
 numpy
 python-multipart   # file uploads (multipart/form-data)
 pyarrow            # Parquet parsing
 mcp                # analysis tools exposed over the Model Context Protocol
 langgraph          # plan-and-execute orchestration graph with HITL interrupts
-python-dotenv      # load backend/.env (ANTHROPIC_API_KEY)
+python-dotenv      # load backend/.env (provider keys + LLM_* overrides)
+jsonschema         # validate every provider's structured output against our schema
+
+# LLM providers — provider-agnostic (see app/providers.py). All pure-python.
+# Lazy-imported: you only need the SDK for the provider whose key you set.
+anthropic          # Anthropic / Claude
+openai             # OpenAI + any OpenAI-compatible endpoint (Azure/Groq/OpenRouter/Ollama/local via LLM_BASE_URL)
+google-genai>=1.0  # Google Gemini

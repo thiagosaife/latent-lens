@@ -29,12 +29,16 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.types import Command, interrupt
 
 from . import datasets as ds_mod
-from . import llm, mcp_client, ml
-from .catalog import CATALOG, build_plan, catalog_meta
+from . import llm, mcp_client, ml, pricing
+from .catalog import CATALOG, build_plan, catalog_meta, estimate_for
+from .providers import get_provider
 from .runs import RESUME_TTL_S, RUNS, RunState
 
 log = logging.getLogger("latentlens.run")
 _FOLLOW_UP = ("selected points", "in common")
+# Steps that make an LLM generation call (a summary card), for the run's cost estimate.
+# (The planner is always one more call on top of these.)
+_LLM_CARD_STEPS = {"profile", "clean", "cluster", "summarize"}
 # Bound a gate wait so an abandoned run (held at a gate, no one ever answers and
 # no client reconnects) can't leak the background task forever.
 GATE_TTL_S = float(os.environ.get("LATENTLENS_GATE_TTL_S", "600"))
@@ -53,6 +57,16 @@ def _fmt_rows(n: int | None) -> str:
     if n is None:
         return "all"
     return f"{n / 1_000_000:.0f}M" if n >= 1_000_000 else f"{n:,}"
+
+
+def _dataset_rows(state: GraphState) -> int:
+    """Real row count of the dataset under analysis — from the profile if it has
+    run, else straight from the registered dataset. Drives the gate estimate."""
+    profile = state.get("profile") or {}
+    if profile.get("rows"):
+        return int(profile["rows"])
+    ds = ds_mod.get_dataset(state.get("dataset_id"))
+    return ds.n if ds is not None else 0
 
 
 # ── Graph state ─────────────────────────────────────────────────────────────
@@ -78,7 +92,7 @@ class GraphState(TypedDict, total=False):
 async def _plan_node(state: GraphState) -> dict:
     """Planner decomposes the goal into an ordered plan (runs once, checkpointed)."""
     planned = await asyncio.to_thread(llm.generate_plan, state["goal"], catalog_meta())
-    proposed = build_plan(planned)
+    proposed = build_plan(planned, _dataset_rows(state))
     return {"proposed": proposed, "plan": [s["id"] for s in proposed], "idx": 0}
 
 
@@ -102,13 +116,23 @@ def _gate_node(state: GraphState) -> dict:
     """Approval gate for a heavy step. The bridge emits approval_required from
     this payload; resume carries the decision."""
     sid = state["plan"][state["idx"]]
-    est = CATALOG[sid].get("estimate", {})
+    est = estimate_for(_dataset_rows(state))  # real dataset size, not a hardcoded literal
+
+    # Real, model-aware cost estimate: the gated step is local ($0), but the run's
+    # LLM generation (planner + summary cards in the plan) costs tokens.
+    provider = get_provider()
+    model = provider.model if provider else None
+    n_calls = 1 + sum(1 for s in state["plan"] if s in _LLM_CARD_STEPS)
+    dollars = pricing.estimate_run_cost(model, n_calls)
+    est["cost"] = pricing.format_cost(dollars, model)
+    cost_note = f" Est. LLM cost for this run: {est['cost']}" + (f" ({model}, est.)." if model else " — no LLM configured.")
+
     decision = interrupt(
         {
             "event": "approval_required",
             "stepId": sid,
             "title": CATALOG[sid]["title"],
-            "message": f"{CATALOG[sid]['title']} would process {_fmt_rows(est.get('rows'))} rows (~{est.get('seconds', '?')}s) before it proceeds.",
+            "message": f"{CATALOG[sid]['title']} would process {_fmt_rows(est['rows'])} rows (~{est['seconds']}s).{cost_note}",
             "estimate": est,
         }
     )
@@ -145,7 +169,7 @@ async def _work_node(state: GraphState) -> dict:
         updates = await _run_step_tool(sid, state)
 
     merged: dict[str, Any] = {**state, **updates}
-    for intent in _intents_for(sid, merged):
+    for intent in await _intents_for(sid, merged):
         w({"type": "ui_intent", "stepId": sid, "intent": intent})
         await asyncio.sleep(0.45)
 
@@ -243,43 +267,23 @@ async def _run_delegated(sid: str, state: GraphState, w, agent: str) -> dict:
     return {}
 
 
-def _intents_for(sid: str, st: dict) -> list[dict]:
+async def _intents_for(sid: str, st: dict) -> list[dict]:
+    """UI intents for a finished step. Stat tiles + the embedding are pure data;
+    the summary_card prose is LLM-generated (offline → deterministic template).
+    The LLM call runs in a thread so it never blocks the event loop / heartbeats."""
     if sid == "profile":
         p = st.get("profile") or {}
-        flagged = p.get("flagged_high_missing", [])[:4]
-        dup = p.get("duplicates", 0)
-        miss_by = p.get("missing_by_col", {})
-        bullets = [f"{c} — {int(miss_by.get(c, 0) * 100)}% missing" for c in flagged]
-        bullets.append(f"{dup:,} duplicate rows" if dup else "No duplicate rows")
+        card = await asyncio.to_thread(llm.generate_profile_summary, p)
         return [
             {"component": "stat_tile", "props": {"label": "Rows profiled", "value": p.get("rows", 0)}},
             {"component": "stat_tile", "props": {"label": "Missing cells", "value": p.get("missing_fraction", 0), "format": "percent"}},
-            {
-                "component": "summary_card",
-                "props": {
-                    "title": "Profiling complete",
-                    "body": f"{p.get('numeric', 0)} numeric and {p.get('categorical', 0)} categorical columns. "
-                    f"{len(flagged)} columns exceed 30% missingness and are flagged for cleaning.",
-                    "bullets": bullets,
-                    "tone": "positive",
-                },
-            },
+            {"component": "summary_card", "props": card},
         ]
 
     if sid == "clean":
         cl = st.get("clean") or {}
-        miss, dup, num = cl.get("missing_cells", 0), cl.get("duplicates", 0), cl.get("numeric", 0)
-        return [
-            {
-                "component": "summary_card",
-                "props": {
-                    "title": "Cleaning complete",
-                    "body": f"Imputed {miss:,} missing cells, removed {dup} duplicate rows, and standardized {num} numeric columns.",
-                    "bullets": [f"{miss:,} cells imputed", f"{dup} duplicate rows removed", f"{num} columns standardized"],
-                    "tone": "neutral",
-                },
-            }
-        ]
+        card = await asyncio.to_thread(llm.generate_clean_summary, cl)
+        return [{"component": "summary_card", "props": card}]
 
     if sid == "reduce":
         ref = st.get("points_ref")
@@ -289,21 +293,14 @@ def _intents_for(sid: str, st: dict) -> list[dict]:
 
     if sid == "cluster":
         sizes = st.get("sizes") or []
-        top = sorted(sizes, reverse=True)[:3]
+        card = await asyncio.to_thread(llm.generate_cluster_summary, sizes)
         return [
             {"component": "stat_tile", "props": {"label": "Clusters found", "value": len(sizes)}},
-            {
-                "component": "summary_card",
-                "props": {
-                    "title": f"{len(sizes)} segments discovered" if sizes else "Clustering complete",
-                    "body": f"k-means over the 2D embedding found {len(sizes)} dense segments.",
-                    "bullets": [f"Segment {chr(65 + i)}: {s:,} rows" for i, s in enumerate(top)],
-                    "tone": "neutral",
-                },
-            },
+            {"component": "summary_card", "props": card},
         ]
 
     if sid == "summarize":
+        # Already LLM-generated upstream (summarize_segments MCP tool → llm.generate_segment_summary).
         return [{"component": "summary_card", "props": st["summary"]}] if st.get("summary") else []
 
     return []
@@ -311,17 +308,18 @@ def _intents_for(sid: str, st: dict) -> list[dict]:
 
 # ── Run lifecycle: a background task produces; HTTP responses subscribe ───────
 
-def start_run(goal: str, dataset_id: str | None = None) -> RunState:
+def start_run(goal: str, dataset_id: str | None = None, selection: dict | None = None) -> RunState:
     """Set up a run and start driving it in the background, returning its state.
 
     The HTTP response streams `state.subscribe()` — so execution is decoupled
     from any one connection: a dropped client can reconnect (GET the run's stream
-    with `after=<last seq>`) and replay what it missed, even mid-gate."""
+    with `after=<last seq>`) and replay what it missed, even mid-gate. `selection`
+    carries the lasso's real cluster composition for the explain follow-up."""
     run_id, trace_id = _newid("run_"), _newid("trace_")
     loop = asyncio.get_running_loop()
     state = RunState(run_id=run_id, trace_id=trace_id, plan_gate=loop.create_future())
     RUNS[run_id] = state
-    asyncio.create_task(_drive(state, goal, dataset_id))
+    asyncio.create_task(_drive(state, goal, dataset_id, selection))
     return state
 
 
@@ -337,7 +335,7 @@ async def _await_gate(state: RunState, fut: asyncio.Future) -> Any:
         return None
 
 
-async def _drive(state: RunState, goal: str, dataset_id: str | None) -> None:
+async def _drive(state: RunState, goal: str, dataset_id: str | None, selection: dict | None = None) -> None:
     """Produce the run's event stream into the resumable buffer (not an HTTP
     response). Survives subscriber disconnects; emits an `error` frame on failure
     so subscribers never hang, and always `finish()`es."""
@@ -349,7 +347,7 @@ async def _drive(state: RunState, goal: str, dataset_id: str | None) -> None:
         await asyncio.sleep(0.25)
 
         if _is_follow_up(goal):
-            await _exec_explain(state, goal)
+            await _exec_explain(state, goal, selection)
         else:
             loop = asyncio.get_running_loop()
             ds_id = dataset_id or ds_mod.register(ml.generate_dataset())
@@ -409,18 +407,37 @@ async def _reap(run_id: str) -> None:
     RUNS.pop(run_id, None)
 
 
-async def _exec_explain(state: RunState, goal: str) -> None:
-    """Lasso → 'explain these points' follow-up: no plan phase, direct execution."""
+async def _exec_explain(state: RunState, goal: str, selection: dict | None = None) -> None:
+    """Lasso → 'explain these points' follow-up: no plan phase, direct execution.
+    Grounded in the selection's REAL cluster composition (sent from the frontend),
+    so the LLM explains the actual region and the stat tiles are real — not faked."""
     sid = "explain"
-    m = re.search(r"(\d[\d,]*)", goal)
-    count = int(m.group(1).replace(",", "")) if m else 0
+    sel = selection or {}
+    count = int(sel.get("count") or 0)
+    if not count:  # typed follow-up without a live selection → recover the count from the text
+        m = re.search(r"(\d[\d,]*)", goal)
+        count = int(m.group(1).replace(",", "")) if m else 0
+
+    # Per-cluster composition → labeled shares (cluster index 0→A, 1→B, …).
+    raw = sel.get("clusters") or []
+    total = sum(int(c.get("count", 0)) for c in raw) or count or 1
+    comp = [
+        {"label": chr(65 + int(c["cluster"])), "count": int(c["count"]), "share": int(c["count"]) / total}
+        for c in raw
+        if c.get("cluster") is not None and c.get("count") is not None
+    ]
+
     state.emit({"type": "step_started", "stepId": sid, "title": "Explain selection"})
     await asyncio.sleep(0.4)
-    intents = [
-        {"component": "summary_card", "props": llm.generate_explain_summary(goal, count)},
-        {"component": "stat_tile", "props": {"label": "Segment size", "value": count or 142}},
-        {"component": "stat_tile", "props": {"label": "Avg recency", "value": 0.82, "format": "percent", "delta": 0.14}},
+    card = await asyncio.to_thread(llm.generate_explain_summary, goal, count, comp)
+    intents: list[dict] = [
+        {"component": "summary_card", "props": card},
+        {"component": "stat_tile", "props": {"label": "Selection size", "value": count}},
     ]
+    if comp:
+        top = comp[0]
+        intents.append({"component": "stat_tile", "props": {"label": f"Top cluster · {top['label']}", "value": round(top["share"], 4), "format": "percent"}})
+        intents.append({"component": "stat_tile", "props": {"label": "Clusters spanned", "value": len(comp)}})
     for intent in intents:
         state.emit({"type": "ui_intent", "stepId": sid, "intent": intent})
         await asyncio.sleep(0.45)

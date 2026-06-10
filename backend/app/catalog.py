@@ -12,12 +12,24 @@ CATALOG: dict[str, dict] = {
     "reduce": {
         "title": "Reduce dimensions (PCA)",
         "description": "Project to 2D for visualization",
-        "needsApproval": True,
-        "estimate": {"rows": 1_000_000, "seconds": 42, "cost": "$0.00 (local)"},
+        "needsApproval": True,  # estimate is computed per-run from the real dataset (see estimate_for)
     },
     "cluster": {"title": "Cluster (k-means)", "description": "Discover dense segments", "delegate": "segmentation-agent"},
     "summarize": {"title": "Summarize segments", "description": "Name & describe each segment"},
 }
+
+# Rough local PCA(SVD)+k-means throughput, used to turn a real row count into a
+# time estimate. Order-of-magnitude only — the point is it tracks the data, not a
+# fixed literal.
+ROWS_PER_SEC = 25_000
+
+
+def estimate_for(rows: int) -> dict:
+    """Cost/time estimate for a heavy (approval-gated) step, derived from the
+    REAL dataset size — not a hardcoded number. Cost is genuinely $0 (local numpy,
+    no API spend)."""
+    rows = max(0, int(rows))
+    return {"rows": rows, "seconds": max(1, round(rows / ROWS_PER_SEC)), "cost": "$0.00 (local)"}
 
 
 def catalog_meta() -> list[dict]:
@@ -25,20 +37,21 @@ def catalog_meta() -> list[dict]:
     return [{"id": sid, "title": c["title"], "description": c["description"]} for sid, c in CATALOG.items()]
 
 
-def _step(sid: str, description: str) -> dict:
-    # Omit `estimate` when absent (the frontend Zod schema treats it as optional
-    # → must be undefined, not null).
+def _step(sid: str, description: str, rows: int) -> dict:
+    # Attach a real, per-run estimate to approval-gated steps; omit it otherwise
+    # (the frontend Zod schema treats `estimate` as optional → must be undefined).
     c = CATALOG[sid]
     step = {"id": sid, "title": c["title"], "description": description, "needsApproval": bool(c.get("needsApproval"))}
-    if c.get("estimate"):
-        step["estimate"] = c["estimate"]
+    if c.get("needsApproval"):
+        step["estimate"] = estimate_for(rows)
     return step
 
 
-def build_plan(planned: list[dict]) -> list[dict]:
+def build_plan(planned: list[dict], rows: int = 0) -> list[dict]:
     """Turn the planner's [{id, reason}] into plan_proposed steps. The reason
-    becomes the step description — the agent's rationale, shown in the editor."""
-    plan = [_step(item["id"], item.get("reason") or CATALOG[item["id"]]["description"]) for item in planned if item.get("id") in CATALOG]
+    becomes the step description — the agent's rationale, shown in the editor.
+    `rows` is the real dataset size, used to compute each gate's estimate."""
+    plan = [_step(item["id"], item.get("reason") or CATALOG[item["id"]]["description"], rows) for item in planned if item.get("id") in CATALOG]
     if not plan:
-        plan = [_step(sid, CATALOG[sid]["description"]) for sid in DEFAULT_PLAN]
+        plan = [_step(sid, CATALOG[sid]["description"], rows) for sid in DEFAULT_PLAN]
     return plan

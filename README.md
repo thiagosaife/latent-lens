@@ -73,8 +73,9 @@ engine, not bolted on:
 
 - **`plan_proposed`** — the agent decomposes the goal into an ordered plan; you
   reorder, rename, or delete steps before it runs.
-- **`approval_required`** — before a heavy step (the PCA over ~1M rows) the
-  stream *holds* and shows a cost/time estimate. Approve, skip, or cancel.
+- **`approval_required`** — before a heavy step (the PCA) the stream *holds* and
+  shows a cost/time estimate **computed from the real dataset** (row count + a
+  derived time), not a hardcoded number. Approve, skip, or cancel.
 
 On the backend these are real LangGraph `interrupt()`s; the SSE stream is held
 server-side and resumed by a side-channel `POST` carrying your decision.
@@ -133,7 +134,7 @@ which it's talking to. The protocol is the seam.
 | Orchestration | LangGraph `StateGraph`, `interrupt()` gates, `MemorySaver` checkpointer | `backend/app/orchestrator.py` |
 | Tools | MCP (FastMCP), connected in-process so tools share the live dataset registry | `backend/app/mcp_tools.py` |
 | ML | numpy-only — PCA via SVD, k-means, profiling | `backend/app/ml.py` |
-| Reasoning | Claude `claude-opus-4-8`, structured outputs (enum-constrained to the step catalog) | `backend/app/llm.py` |
+| Reasoning | Pluggable LLM — Anthropic / OpenAI / Gemini / OpenAI-compatible, structured outputs (enum-constrained to the step catalog) | `backend/app/providers.py`, `backend/app/llm.py` |
 
 ## What it does — a tour
 
@@ -185,11 +186,13 @@ browser-verified (Playwright against system Chrome).
 
 **Honest caveats:**
 
-- **Live Claude needs a funded key.** Planner and summary prose call
-  `claude-opus-4-8` with structured outputs; without a key (or with a $0-balance
-  account) both fall back to deterministic, goal-aware logic, so the pipeline
-  runs fully offline. Set `ANTHROPIC_API_KEY` in `backend/.env` to light up real
-  generation. See [`backend/README.md`](backend/README.md).
+- **Live generation needs a provider key.** Planner and summary prose call the
+  configured LLM with structured outputs. The provider is **pluggable** —
+  Anthropic, OpenAI, Gemini, or any OpenAI-compatible endpoint, auto-detected from
+  whichever key is set (`backend/app/providers.py`). Without a key (or with an
+  unfunded account) both fall back to deterministic, goal-aware logic, so the
+  pipeline runs fully offline. Set one key in `backend/.env` to light it up. See
+  [`backend/README.md`](backend/README.md).
 - The screenshots above are stills; an animated GIF of the lasso→follow-up loop
   is a nice-to-have not yet captured.
 - A dropped stream **resumes by runId** (the run keeps executing server-side and

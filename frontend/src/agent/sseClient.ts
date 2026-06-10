@@ -12,6 +12,8 @@ export interface StreamOptions {
   signal?: AbortSignal
   /** Analyze an uploaded dataset instead of the synthetic default. */
   datasetId?: string
+  /** Lasso composition for the explain follow-up: { count, clusters: [{cluster, count}] }. */
+  selection?: unknown
 }
 
 // Resume-on-drop: if the stream dies mid-run (network blip), reconnect to the
@@ -49,12 +51,16 @@ export async function streamRun(
   const baseUrl = opts.url ?? '/api/runs'
   const ctx: StreamCtx = { lastSeq: 0, runId: null, terminal: false, madeProgress: false }
 
+  const startBody: Record<string, unknown> = { goal }
+  if (opts.datasetId) startBody.datasetId = opts.datasetId
+  if (opts.selection) startBody.selection = opts.selection
+
   let outcome = await consume(
     () =>
       fetch(baseUrl, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Accept: 'text/event-stream', ...authHeaders() },
-        body: JSON.stringify(opts.datasetId ? { goal, datasetId: opts.datasetId } : { goal }),
+        body: JSON.stringify(startBody),
         signal: opts.signal,
       }),
     ctx,

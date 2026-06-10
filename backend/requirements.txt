@@ -8,3 +8,4 @@ python-multipart   # file uploads (multipart/form-data)
 pyarrow            # Parquet parsing
 mcp                # analysis tools exposed over the Model Context Protocol
 langgraph          # plan-and-execute orchestration graph with HITL interrupts
+python-dotenv      # load backend/.env (ANTHROPIC_API_KEY)

@@ -11,7 +11,15 @@ and a Claude-generated summary card (with an offline fallback).
 cd backend
 python3 -m venv .venv
 .venv/bin/pip install -r requirements.txt
+
+# optional: enable live Claude (planner + summaries). Without a key the app
+# uses deterministic fallbacks and still runs fully.
+cp .env.example .env      # then put YOUR Anthropic API key in .env
 ```
+
+`.env` is gitignored — each tester supplies their own key. Get one at
+<https://console.anthropic.com/> (the account needs a non-zero credit balance,
+or calls return `400 credit balance too low` and the app falls back).
 
 ## Run
 

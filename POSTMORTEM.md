@@ -73,7 +73,7 @@ output, a crashed-new / surviving-old state was invisible at the call site.
 | 3 | Graceful shutdown on `SIGINT`/`SIGTERM` so instances don't linger | ✅ done |
 | 4 | Structured `server.start` log line carries the version | ✅ done |
 | 5 | Verification kills stragglers (`pkill -f agent-server.mjs`) before launching | ✅ done (process discipline) |
-| 6 | Follow-up: have the verify script assert `/health` `version` before driving the app | ⬜ proposed |
+| 6 | Verify scripts assert `/health` `version` (build identity) before driving the app — abort loudly if the backend is unreachable, unidentified, or `EXPECT_VERSION`-mismatched | ✅ done |
 
 ## Lessons
 

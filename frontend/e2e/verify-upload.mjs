@@ -9,6 +9,7 @@ import { chromium } from 'playwright'
 import { mkdirSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
+import { assertBackendHealth } from './health.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const SHOTS = join(HERE, 'shots')
@@ -22,6 +23,10 @@ const page = await browser.newPage({ viewport: { width: 1280, height: 920 }, dev
 page.on('pageerror', (e) => out.logs.push(`[pageerror] ${e.message}`))
 
 try {
+  // 0) Identity before behavior: prove which backend build answers :8787 before
+  //    driving the app, or abort loudly (POSTMORTEM #6).
+  await assertBackendHealth(out)
+
   await page.goto(URL, { waitUntil: 'domcontentloaded' })
 
   // 1) initial synthetic run shows its plan

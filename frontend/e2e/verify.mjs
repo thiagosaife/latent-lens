@@ -10,6 +10,7 @@ import { chromium } from 'playwright'
 import { mkdirSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
+import { assertBackendHealth } from './health.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const SHOTS = join(HERE, 'shots')
@@ -25,6 +26,10 @@ page.on('console', (m) => out.logs.push(`[${m.type()}] ${m.text()}`))
 page.on('pageerror', (e) => out.logs.push(`[pageerror] ${e.message}`))
 
 try {
+  // 0) Identity before behavior: prove which backend build we're about to test,
+  //    or abort. Guards against a stale server squatting :8787 (POSTMORTEM #6).
+  await assertBackendHealth(out)
+
   await page.goto(URL, { waitUntil: 'domcontentloaded' })
 
   // 1) Editable plan renders with 5 steps

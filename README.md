@@ -3,12 +3,38 @@
 **An AI agent that explores a dataset by driving an interactive, inspectable UI.**
 Generative UI + human-in-the-loop + data viz — built to show *depth*, not glue code.
 
-You give it a goal in plain English ("find the structure in this customer
-dataset and tell me what the segments are"). It proposes a plan you can edit,
-pauses for your approval before anything expensive, then streams a live
-dashboard into existence — profiling cards, a WebGL embedding you can lasso,
-named segments — while a trace inspector shows you every event, tool call, and
-span that produced it.
+LatentLens turns a plain-English goal into a live, auditable analysis session. You
+ask for something — *"find the structure in this customer dataset and tell me what
+the segments are"* — and an agent **plans** the work, **pauses for your approval**
+before anything expensive, then **streams a dashboard into existence**: profiling
+cards, a WebGL embedding you can lasso, named segments, and data-grounded
+explanations — while a trace inspector records every event, tool call, and span
+that produced it.
+
+What makes it more than a chatbot-with-charts is the discipline underneath. The
+agent **never renders arbitrary UI and never runs unsupervised.** It emits *typed
+UI intents* that a registry validates and renders; it *holds* at human checkpoints
+encoded directly into its control flow; its analysis runs over *real tools* whose
+calls are attributed and inspectable. The result is a generative-UI system you can
+actually **trust, steer, and audit** — not a black box that paints pixels.
+
+## Purpose
+
+This is a portfolio project built to demonstrate — from scratch, without an
+off-the-shelf copilot framework — how to engineer the genuinely hard parts of an
+agentic, generative-UI application:
+
+- a **constrained surface** for model-driven UI (the model proposes; a typed
+  registry disposes),
+- **human-in-the-loop as real control flow** (approval gates that are first-class
+  graph interrupts, not modal afterthoughts),
+- **multi-agent tool use over MCP** (specialist sub-agents invoking real,
+  fine-grained tools over real data),
+- and **end-to-end observability** (every run is a traceable, replayable stream).
+
+Every layer is hand-built and browser-verified. The emphasis throughout is depth
+of engineering over breadth of features — the interesting code is in *how* the
+agent is bounded, paused, and inspected, not in how many widgets it can draw.
 
 ![The agent proposes an editable plan and waits for approval before running](docs/01-plan.png)
 
@@ -99,7 +125,7 @@ back. Swapping them is a one-line proxy change.
 ┌─────────────────────────── Browser · Vue 3 + TypeScript ───────────────────────────┐
 │                                                                                     │
 │   useAgentRun ──▶ Pattern Registry ──▶ only vetted Vue components reach the DOM      │
-│   (phase state    (Zod-validates          (stat_tile · summary_card ·               │
+│   (phase state    (Zod-validates       (stat_tile · summary_card · feature_delta ·  │
 │    machine)        every {component,props})  embedding_scatter [WebGL hero])         │
 │        ▲                                                                             │
 └────────┼─────────────────────────────────────────────────────────────────────────┬─┘
@@ -115,7 +141,7 @@ back. Swapping them is a one-line proxy change.
 │       · MCP tools: profile/clean/reduce/      │     fastest way to run the           │
 │         cluster/summarize (FastMCP)           │     frontend.                        │
 │       · numpy ML: PCA (SVD) + k-means         │                                      │
-│       · Claude (opus-4-8): planner + summary  │                                      │
+│       · LLM, any provider: planner + summary  │                                      │
 │         prose, structured outputs             │                                      │
 └─────────────────────────────────────────────────────────────────────────────────────┘
 ```
@@ -146,11 +172,20 @@ which it's talking to. The protocol is the seam.
 
 **A WebGL embedding you can interrogate.** PCA → 2D, k-means → colored segments,
 rendered with `regl-scatterplot`. Toggle **Lasso** and drag to select a region;
-the selection (count + per-cluster composition) flows back to the agent. "Explain these points"
-launches a follow-up run that skips planning and goes straight to an answer —
-the lasso→agent→UI loop closing on itself.
+the selection flows back to the agent. **"Explain these points"** launches a
+follow-up run that skips planning and answers directly.
 
 ![Lasso a region of the embedding; 26k points selected with cluster composition, plus the delegation trace](docs/03-embedding-lasso.png)
+
+And the answer is **grounded in the real data, not hand-waved.** The selected
+points are mapped back to their dataset rows and each numeric feature's mean is
+compared to the whole population as a z-score — so the agent explains the region
+by *what actually distinguishes it* ("skews high on spend, low on recency") rather
+than a vague gesture at the clusters. Those per-feature deltas render as a
+`feature_delta` diverging-bar pattern, and the LLM's written explanation cites the
+same numbers. This is the brushing→agent→UI loop closing on itself.
+
+![The explain follow-up: real per-feature z-score deltas as diverging bars](docs/06-explain-feature-delta.png)
 
 **Multi-agent delegation, attributed.** Heavy steps delegate to specialist
 sub-agents (`cleaning-agent`, `segmentation-agent`) that invoke **real MCP
@@ -165,24 +200,31 @@ results, filterable by step/tool/UI.
 
 ![Trace inspector: 33 events, 5 tool calls, span durations, expandable raw I/O](docs/04-trace-inspector.png)
 
-**Real data, not a fixture.** Drop in a CSV or Parquet file and the same
-pipeline profiles, cleans, and embeds *your* data — real missingness, real
-duplicates, real PCA.
+**Real data, not a fixture.** Drop in a CSV or Parquet file and the backend
+auto-detects the delimiter (`, ; tab |`) and whether there's a header row, then
+shows you the parsed **schema for review** — every column's inferred type and its
+missingness — *before* a single step runs. Confirm, and the same pipeline
+profiles, cleans, and embeds *your* data: real missingness, real duplicates, real
+PCA. (Nothing executes until you've seen what was parsed and clicked **Run
+analysis** — the same "look before you leap" stance as the approval gates.)
 
-![Uploaded CSV profiled live — real row counts, missingness, duplicates](docs/05-csv-upload.png)
+![Schema preview: detected delimiter, header, per-column type and missingness — review before running](docs/07-upload-preview.png)
 
 ## Status & results
 
 The spec's full 5-layer architecture is implemented end-to-end and
 browser-verified (Playwright against system Chrome).
 
-- **~2,650 lines** of frontend TypeScript/Vue (11 components), **~1,190 lines**
-  of backend Python (11 modules), plus a **~570-line** zero-dep Node mock.
+- **~3,140 lines** of frontend TypeScript/Vue (12 components), **~1,930 lines**
+  of backend Python (13 modules), plus a **~580-line** zero-dep Node mock.
 - **Two interchangeable backends behind one Zod-validated protocol** — the
   frontend is unchanged whether it talks to the mock or the real service.
+- **11 MCP tools** and **4 vetted UI patterns** (`stat_tile`, `summary_card`,
+  `feature_delta`, `embedding_scatter`).
 - Everything in the tour above is real and verified: editable plan, approval
-  gates, WebGL lasso→follow-up, delegation traces, trace inspector, CSV/Parquet
-  upload.
+  gates, WebGL lasso → feature-grounded explain, delegation traces, trace
+  inspector, and CSV/Parquet upload with delimiter/header detection and a
+  schema-preview confirm step.
 
 **Honest caveats:**
 
@@ -216,7 +258,7 @@ open http://localhost:5173
 # 2 · The real deal — frontend + FastAPI/LangGraph/MCP backend
 cd backend
 python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
-cp .env.example .env     # optional: add your Anthropic key for live Claude
+cp .env.example .env     # optional: add ANY provider key for live generation
 cd ../frontend
 npm run dev:api          # Vite :5173 + uvicorn :8787 (the real backend)
 
@@ -252,6 +294,12 @@ These are the "why", not the "what" — the choices a reviewer would ask about:
   frontend *is* the wire contract; the Python side builds dicts with the exact
   camelCase keys it validates, rather than maintaining a parallel schema that
   could drift.
+- **Explanations are computed, then narrated — not invented.** When you lasso a
+  region, the per-feature deltas the agent talks about are z-scores computed
+  server-side from the selected rows' real values (a real MCP tool maps embedding
+  points back to dataset rows). The LLM writes prose *around* those numbers; it
+  never makes them up. Same separation everywhere: data is data, the model only
+  ever writes the words.
 
 ## Repo layout
 

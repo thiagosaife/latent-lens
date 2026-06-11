@@ -57,7 +57,7 @@ The Vite proxy already targets `:8787`, so this swaps cleanly with `npm run dev:
 | `POST` | `/api/runs/:id/decision` | resolve a gate `{ stepId, decision }` |
 | `GET`  | `/api/runs/:id/stream?after=N` | reconnect to a dropped run → replay frames after seq `N`, then follow live |
 | `POST` | `/api/runs/:id/cancel` | intentional stop — tear the run down server-side |
-| `POST` | `/api/datasets` | upload a CSV/Parquet file → `{ datasetId, … }` to analyze |
+| `POST` | `/api/datasets` | upload a CSV/Parquet → parse + profile → `{ datasetId, delimiter, hasHeader, columns[], … }` schema for the preview/confirm step |
 | `GET`  | `/api/points?ref&n` | binary `Float32` cloud `[x, y, cluster] * n` |
 | `GET`  | `/health` | `{ status, version, activeRuns }` |
 
@@ -90,7 +90,16 @@ treats as "run gone, stop retrying".)
   CSV/Parquet* flows through MCP tools — `profile_dataset` (counts, missingness,
   duplicates) → `reduce_dimensions` (PCA via SVD + k-means, served by ref) →
   `cluster_segments` (sizes). Tool-call args/results reflect actual numbers (e.g.
-  imputed cell count = missing-fraction × rows).
+  imputed cell count = missing-fraction × rows). Uploaded CSVs have their
+  delimiter (`, ; \t |`) and header presence **auto-detected** (`app/datasets.py`,
+  via `csv.Sniffer` + heuristic fallbacks; headerless files get `col1…colN`); the
+  parsed schema is returned for a client-side preview-and-confirm before any run.
+- **Real explanations:** the lasso "explain these points" follow-up maps the
+  selected embedding points back to their dataset rows and z-scores each numeric
+  feature's selection mean against the population — over a real MCP tool,
+  `selection_feature_stats`. So the answer is grounded in *what distinguishes the
+  region* (top features by |z|), surfaced as a `feature_delta` UI intent; the LLM
+  only writes prose around those computed numbers.
 - **Real delegation:** the `clean`/`cluster` steps delegate to specialist
   sub-agents that invoke *fine-grained* MCP tools for real — the cleaning-agent
   calls `impute_missing`/`drop_duplicates`/`standardize_columns`, the

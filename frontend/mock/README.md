@@ -1,9 +1,15 @@
 # Mock agent server
 
-A zero-dependency stand-in for the future FastAPI / LangGraph + MCP backend.
+A zero-dependency stand-in for the real FastAPI / LangGraph + MCP backend (see
+[`../../backend`](../../backend)) — handy for running the frontend with no Python.
 Streams an interruptible plan-and-execute run over SSE and serves embedding
 points. The hardening controls here (`hardening.mjs`) are the same ones the real
-backend would run as middleware.
+backend runs as middleware.
+
+It speaks the same `AgentEvent` protocol, so the frontend is unchanged either way.
+It is deliberately a *frontend convenience*, not feature-parity: the real-backend
+extras — CSV/Parquet upload, the feature-grounded explain (`feature_delta`), and
+the resumable per-run buffer (`/stream` replay) — live only in the FastAPI service.
 
 ## Run
 

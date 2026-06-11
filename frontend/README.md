@@ -34,7 +34,7 @@ src/
 │   ├── registry.ts           ·  vetted patterns; resolveIntent() is the single gate to the DOM
 │   ├── types.ts              ·  PatternDef, RawIntent, hero|generated kinds
 │   ├── IntentRenderer.vue    ·  renders a resolved intent (or an explicit rejection)
-│   └── components/           ·  StatTile · SummaryCard · EmbeddingScatter (WebGL hero) · UnknownIntent
+│   └── components/           ·  StatTile · SummaryCard · FeatureDelta (z-score diverging bars) · EmbeddingScatter (WebGL hero) · UnknownIntent
 ├── agent/
 │   ├── events.ts             ·  Zod AgentEvent schema — the wire contract, validated at the boundary
 │   ├── sseClient.ts          ·  POST + ReadableStream SSE reader; resumes a dropped stream by runId (?after=seq) with backoff
@@ -43,8 +43,8 @@ src/
 │   ├── ApprovalGate.vue      ·  cost/time estimate → approve · skip · cancel
 │   ├── DelegationTrace.vue   ·  attributed sub-agent tool calls (inputs→outputs)
 │   ├── TraceInspector.vue    ·  bottom-drawer observability: spans, durations, raw I/O
-│   ├── DatasetUpload.vue     ·  CSV/Parquet upload → POST /api/datasets
-│   ├── selection.ts          ·  reactive lasso-selection store (shared, not Vue events)
+│   ├── DatasetUpload.vue     ·  CSV/Parquet upload → schema preview (delimiter/header/types) → confirm → POST /api/datasets
+│   ├── selection.ts          ·  reactive lasso-selection store (count + indices + cluster composition; shared, not Vue events)
 │   └── http.ts               ·  optional bearer auth header (VITE_API_TOKEN, off by default)
 └── App.vue                   ·  console layout wiring it together
 ```

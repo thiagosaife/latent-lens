@@ -3,6 +3,7 @@ import { definePattern, type PatternDef, type RawIntent, type ResolveResult } fr
 import StatTile from './components/StatTile.vue'
 import SummaryCard from './components/SummaryCard.vue'
 import EmbeddingScatter from './components/EmbeddingScatter.vue'
+import FeatureDelta from './components/FeatureDelta.vue'
 
 /* ──────────────────────────────────────────────────────────────────────────
  * Pattern definitions = the constrained generation surface.
@@ -51,8 +52,31 @@ const embeddingScatter = definePattern({
   component: EmbeddingScatter,
 })
 
+const featureDelta = definePattern({
+  name: 'feature_delta',
+  kind: 'generated',
+  description: 'Diverging bars of the features that most distinguish a selection (z-score vs population).',
+  schema: z.object({
+    title: z.string().min(1).optional(),
+    features: z
+      .array(
+        z.object({
+          feature: z.string().min(1),
+          z: z.number(),
+          selMean: z.number().optional(),
+          popMean: z.number().optional(),
+          direction: z.enum(['above', 'below']).optional(),
+        }),
+      )
+      .min(1)
+      .max(8),
+    note: z.string().optional(),
+  }),
+  component: FeatureDelta,
+})
+
 /** The registry. Add a pattern here and it becomes renderable; nothing else can. */
-export const PATTERNS = [statTile, summaryCard, embeddingScatter] as const
+export const PATTERNS = [statTile, summaryCard, embeddingScatter, featureDelta] as const
 
 const byName = new Map<string, PatternDef>(PATTERNS.map((p) => [p.name, p]))
 

@@ -44,7 +44,7 @@ SSE_HEADERS = {"Cache-Control": "no-cache, no-transform", "Connection": "keep-al
 class RunBody(BaseModel):
     goal: str | None = None
     datasetId: str | None = None
-    selection: dict | None = None  # lasso composition for the explain follow-up: {count, clusters:[{cluster,count}]}
+    selection: dict | None = None  # lasso context for the explain follow-up: {count, pointsRef, indices:[int], clusters:[{cluster,count}]}
 
 
 class StepRef(BaseModel):

@@ -109,22 +109,31 @@ def generate_segment_summary(goal: str, profile: dict, sizes: list[int]) -> dict
     return _card("summary", system, prompt, lambda: _fallback_summary(profile, sizes))
 
 
-def generate_explain_summary(goal: str, count: int, composition: list[dict] | None = None) -> dict:
+def generate_explain_summary(
+    goal: str, count: int, composition: list[dict] | None = None, features: list[dict] | None = None
+) -> dict:
     """summary_card props for the lasso → 'explain these points' follow-up, grounded
-    in the selection's REAL cluster composition (`composition`: [{label, count, share}])."""
+    in the selection's REAL cluster composition (`composition`: [{label, count, share}])
+    AND the features that most distinguish it from the population (`features`:
+    [{feature, z, direction}] — z-scores of the selected rows' means)."""
     comp = composition or []
+    feats = features or []
     comp_txt = ", ".join(f"cluster {c['label']} {c['share'] * 100:.0f}%" for c in comp) or "composition unknown"
+    feat_txt = ", ".join(f"{f['feature']} {f['z']:+.1f}σ ({f['direction']} average)" for f in feats[:4]) or "feature deltas unavailable"
     system = (
         "You are a data-analysis agent explaining what a lasso-selected region of a 2D customer "
-        "embedding has in common, grounded in its real CLUSTER COMPOSITION. Concise; body under "
-        "~35 words; 2-3 bullets; tone 'neutral'."
+        "embedding has in common. Ground the explanation in the real DISTINGUISHING FEATURES "
+        "(z-scores vs the population) and the CLUSTER COMPOSITION. Concise; body under ~35 words; "
+        "2-3 bullets; tone 'neutral'."
     )
     prompt = (
         f"The user lassoed {count:,} points and asked: {goal!r}.\n"
+        f"Features that most distinguish this region (z-score vs population): {feat_txt}.\n"
         f"Selection cluster composition (descending): {comp_txt}.\n"
-        "Explain what this region likely shares — reference the dominant cluster(s) and how concentrated the selection is."
+        "Explain what this region likely shares — name the 1-2 features that stand out and their "
+        "direction, and reference the dominant cluster(s)."
     )
-    return _card("explain", system, prompt, lambda: _fallback_explain(count, comp))
+    return _card("explain", system, prompt, lambda: _fallback_explain(count, comp, feats))
 
 
 # ── Deterministic fallbacks (used offline / on any LLM failure) ──────────────
@@ -182,8 +191,18 @@ def _fallback_summary(profile: dict, sizes: list[int]) -> dict:
     }
 
 
-def _fallback_explain(count: int = 0, composition: list[dict] | None = None) -> dict:
+def _fallback_explain(count: int = 0, composition: list[dict] | None = None, features: list[dict] | None = None) -> dict:
     comp = composition or []
+    feats = features or []
+    if feats:
+        phrases = [f"{f['feature']} ({f['z']:+.1f}σ {f['direction']} average)" for f in feats[:2]]
+        tail = f", concentrating in cluster {comp[0]['label']} ({comp[0]['share'] * 100:.0f}%)" if comp else ""
+        return {
+            "title": "What distinguishes these points",
+            "body": f"These {count:,} points stand out on {' and '.join(phrases)}{tail} — a coherent sub-population.",
+            "bullets": [f"{f['feature']}: {f['z']:+.1f}σ {f['direction']} the population mean" for f in feats[:4]],
+            "tone": "neutral",
+        }
     if comp:
         top = comp[0]
         return {

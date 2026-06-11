@@ -32,17 +32,24 @@ try {
   // 1) initial synthetic run shows its plan
   await page.waitForSelector('.plan-item', { timeout: 10000 })
 
-  // 2) connect a CSV via the (hidden) file input
+  // 2) connect a CSV via the (hidden) file input → schema PREVIEW (no run yet)
   await page.locator('.dataset input[type=file]').setInputFiles(CSV)
+  await page.waitForSelector('.dataset .preview', { timeout: 10000 })
+  out.steps.previewMeta = (await page.locator('.preview .pv-meta').innerText()).replace(/\s+/g, ' ').trim()
+  out.steps.previewColumns = await page.locator('.preview .cols li').count()
+  out.steps.previewDelimiter = await page.locator('.preview .pv-meta .tag strong').first().innerText()
+  await page.locator('.dataset').scrollIntoViewIfNeeded()
+  await page.screenshot({ path: join(SHOTS, '8-upload-preview.png') })
+
+  // 2b) confirm: "Run analysis" connects the dataset (chip) and starts the run
+  await page.getByRole('button', { name: /Run analysis/ }).click()
   await page.waitForSelector('.dataset .chip', { timeout: 10000 })
   out.steps.chip = (await page.locator('.dataset .chip').innerText()).replace(/\s+/g, ' ').trim()
 
-  // 3) upload restarts the run against the uploaded data → fresh plan
+  // 3) the run analyzes the uploaded data → fresh plan
   await page.waitForTimeout(1200) // let the restart settle (cancel → new plan_proposed)
   await page.waitForSelector('.plan-item', { timeout: 10000 })
   out.steps.planStepCount = await page.locator('.plan-item').count()
-  await page.locator('.dataset').scrollIntoViewIfNeeded()
-  await page.screenshot({ path: join(SHOTS, '8-upload.png') })
 
   // 4) approve → profiling should reflect the CSV's real row count (2000)
   await page.getByRole('button', { name: /Approve & run/ }).click()

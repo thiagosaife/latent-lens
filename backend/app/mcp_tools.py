@@ -50,6 +50,15 @@ def cluster_segments(points_ref: str) -> dict:
     return {"sizes": ml.embedding_sizes(points_ref)}
 
 
+@mcp.tool()
+def selection_feature_stats(points_ref: str, indices: list[int]) -> dict:
+    """Profile a lasso selection by feature: each numeric column's selection mean
+    as a z-score from the population mean, ranked by how much it distinguishes the
+    region. Maps the selected embedding points back to real dataset rows. Returns
+    {} when the selection can't be resolved (unknown ref / empty selection)."""
+    return ml.selection_feature_stats(points_ref, indices) or {}
+
+
 # ── Fine-grained tools the specialist sub-agents actually delegate to ─────────
 # The cleaning-agent calls impute/drop_duplicates/standardize; the
 # segmentation-agent calls run_kmeans/label_segments. Each is a real MCP round

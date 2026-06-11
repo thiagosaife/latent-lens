@@ -117,6 +117,23 @@ try {
   // Which steps actually executed (the deleted last step should be absent)
   out.steps.executedSteps = await page.locator('.step .step-title').allInnerTexts()
   out.steps.delegatedAgents = await page.locator('.agent-tag').allInnerTexts()
+
+  // 8) Lasso → explain follow-up: trigger it and assert the feature-grounded
+  //    explain card + diverging feature_delta bars render. The z-scores are
+  //    computed server-side from the selected points' real feature values.
+  await page.locator('.trace .bar').click() // collapse the trace drawer so it doesn't overlap the card
+  await page.waitForTimeout(200)
+  await page.getByRole('button', { name: /Explain these points/ }).click()
+  await page.waitForSelector('.feature-delta', { timeout: 15000 })
+  await page.waitForTimeout(1500)
+  await page.locator('.feature-delta').scrollIntoViewIfNeeded()
+  await page.waitForTimeout(200)
+  out.steps.featureDeltaVisible = await page.locator('.feature-delta').isVisible().catch(() => false)
+  out.steps.featureDeltaBars = await page.locator('.feature-delta li').count()
+  out.steps.featureDeltaText = (await page.locator('.feature-delta').innerText().catch(() => null))?.replace(/\s+/g, ' ').trim()
+  out.steps.explainCardText = (await page.locator('.summary-card').last().innerText().catch(() => null))?.replace(/\s+/g, ' ').trim()
+  await page.locator('.feature-delta').screenshot({ path: join(SHOTS, '8-feature-delta.png') })
+
   out.ok = true
 } catch (err) {
   out.ok = false

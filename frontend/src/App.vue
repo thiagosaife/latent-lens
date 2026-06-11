@@ -36,20 +36,40 @@ function onApprovePlan(steps: PlanStep[]) {
   run.approvePlan(steps)
 }
 
-// Connecting a dataset immediately (re)starts a run analyzing it.
+// Fired once the user confirms the schema preview ("Run analysis"): connect the
+// dataset and (re)start a run analyzing it.
 function onUploaded(meta: DatasetMeta) {
   dataset.value = meta
   run.start(goalInput.value, meta.datasetId)
 }
 
+// Cap the point indices shipped for the per-feature stats — a uniform sample
+// keeps the request bounded while the population means stay essentially exact.
+const MAX_SELECTION_SAMPLE = 20000
+function sampleIndices(all: readonly number[]): number[] {
+  if (all.length <= MAX_SELECTION_SAMPLE) return all.slice()
+  const out: number[] = []
+  for (let i = 0; i < MAX_SELECTION_SAMPLE; i++) {
+    const v = all[Math.floor((i * all.length) / MAX_SELECTION_SAMPLE)]
+    if (v !== undefined) out.push(v)
+  }
+  return out
+}
+
 // Lasso → agent: turn the live selection into a follow-up run (skips planning).
-// Send the REAL cluster composition so the agent explains the actual region.
+// Send the REAL cluster composition AND the selected point indices, so the agent
+// explains the region by the features that actually distinguish it — not faked.
 function explainSelection() {
   const n = selection.count
   if (!n) return
   const goal = `Explain what these ${n.toLocaleString()} selected points have in common.`
   goalInput.value = goal
-  const sel = { count: n, clusters: selection.clusters.map((c) => ({ cluster: c.cluster, count: c.count })) }
+  const sel = {
+    count: n,
+    pointsRef: selection.pointsRef,
+    indices: sampleIndices(selection.indices),
+    clusters: selection.clusters.map((c) => ({ cluster: c.cluster, count: c.count })),
+  }
   run.start(goal, dataset.value?.datasetId, sel)
 }
 

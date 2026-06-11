@@ -409,8 +409,10 @@ async def _reap(run_id: str) -> None:
 
 async def _exec_explain(state: RunState, goal: str, selection: dict | None = None) -> None:
     """Lasso → 'explain these points' follow-up: no plan phase, direct execution.
-    Grounded in the selection's REAL cluster composition (sent from the frontend),
-    so the LLM explains the actual region and the stat tiles are real — not faked."""
+    Grounded in the selection's REAL cluster composition AND its real per-feature
+    deltas vs the population (mapped from the selected points back to dataset rows
+    over a real MCP tool call) — so the LLM explains the actual region by the
+    features that distinguish it, and the tiles/bars are real, not faked."""
     sid = "explain"
     sel = selection or {}
     count = int(sel.get("count") or 0)
@@ -427,13 +429,32 @@ async def _exec_explain(state: RunState, goal: str, selection: dict | None = Non
         if c.get("cluster") is not None and c.get("count") is not None
     ]
 
+    # Real per-feature deltas: map the selected embedding points back to dataset
+    # rows and z-score their feature means vs the population — over a real MCP tool.
+    points_ref = sel.get("pointsRef")
+    indices = sel.get("indices") or []
+    stats: dict = {}
+    if points_ref and indices:
+        try:
+            stats = await mcp_client.call("selection_feature_stats", points_ref=points_ref, indices=indices)
+        except Exception:  # stats are an enrichment — never let them break the explain
+            log.warning(json.dumps({"msg": "explain.stats_failed", "runId": state.run_id}))
+    features = stats.get("features") or []
+
     state.emit({"type": "step_started", "stepId": sid, "title": "Explain selection"})
     await asyncio.sleep(0.4)
-    card = await asyncio.to_thread(llm.generate_explain_summary, goal, count, comp)
-    intents: list[dict] = [
-        {"component": "summary_card", "props": card},
-        {"component": "stat_tile", "props": {"label": "Selection size", "value": count}},
-    ]
+    card = await asyncio.to_thread(llm.generate_explain_summary, goal, count, comp, features)
+    intents: list[dict] = [{"component": "summary_card", "props": card}]
+    if features:
+        intents.append({
+            "component": "feature_delta",
+            "props": {
+                "title": "What distinguishes these points",
+                "features": features,
+                "note": f"{stats.get('selected', count):,} selected points vs {stats.get('population', 0):,} in the population",
+            },
+        })
+    intents.append({"component": "stat_tile", "props": {"label": "Selection size", "value": count}})
     if comp:
         top = comp[0]
         intents.append({"component": "stat_tile", "props": {"label": f"Top cluster · {top['label']}", "value": round(top["share"], 4), "format": "percent"}})

@@ -13,6 +13,10 @@ export interface DatasetMeta {
   numeric: number
   categorical: number
   duplicates: number
+  /** Detected CSV field delimiter (null for Parquet). */
+  delimiter?: string | null
+  /** Whether the source carried a header row (else columns are col1…colN). */
+  hasHeader?: boolean
   columns: DatasetColumn[]
 }
 

@@ -8,4 +8,4 @@ from dotenv import load_dotenv
 # Existing environment variables take precedence (override=False).
 load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
-VERSION = "0.8.0"  # resumable SSE: decoupled runs, id-tagged frames, heartbeats, /stream + /cancel
+VERSION = "0.10.0"  # CSV upload polish: delimiter/header auto-detect + schema preview-then-confirm

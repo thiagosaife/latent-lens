@@ -18,6 +18,11 @@ MAX_EMBED_POINTS = 100_000  # subsample the embedding above this for responsiven
 # In-memory embedding store: pointsRef -> (n, 3) float32 [x, y, cluster].
 _EMBEDDINGS: dict[str, np.ndarray] = {}
 
+# Per-ref mapping back to the source rows, for feature-grounded selection stats:
+# pointsRef -> (dataset, row_index_per_embedding_point). When the embedding was
+# subsampled, point i maps to dataset row rows[i]; otherwise rows == arange(n).
+_EMBED_META: dict[str, tuple["Dataset", np.ndarray]] = {}
+
 
 @dataclass
 class Dataset:
@@ -29,6 +34,8 @@ class Dataset:
     missing_by_col: dict[str, float]  # fraction missing, per column that has any
     missing_cells: int  # total missing cells across all columns
     duplicates: int
+    delimiter: str | None = None  # CSV delimiter detected at parse (None for parquet/synthetic)
+    has_header: bool = True  # whether the source CSV carried a header row
 
 
 def generate_dataset(seed: int = RNG_SEED, n: int = N_ROWS, k: int = K_CLUSTERS) -> Dataset:
@@ -96,8 +103,10 @@ def build_embedding(run_id: str, ds: Dataset, k: int = K_CLUSTERS) -> tuple[str,
     MAX_EMBED_POINTS so huge uploads stay responsive."""
     feats = ds.features
     if ds.n > MAX_EMBED_POINTS:
-        idx = np.random.default_rng(RNG_SEED).choice(ds.n, MAX_EMBED_POINTS, replace=False)
-        feats = feats[idx]
+        rows = np.random.default_rng(RNG_SEED).choice(ds.n, MAX_EMBED_POINTS, replace=False)
+        feats = feats[rows]
+    else:
+        rows = np.arange(ds.n)
     n_pts = len(feats)
 
     mu = feats.mean(0, keepdims=True)
@@ -113,6 +122,7 @@ def build_embedding(run_id: str, ds: Dataset, k: int = K_CLUSTERS) -> tuple[str,
 
     ref = f"pca://{run_id}"
     _EMBEDDINGS[ref] = pts
+    _EMBED_META[ref] = (ds, rows)
     sizes = np.bincount(labels, minlength=k).tolist()
     return ref, n_pts, sizes
 
@@ -141,3 +151,43 @@ def run_kmeans_on(ref: str, k: int = K_CLUSTERS) -> list[int]:
         return []
     labels = _kmeans(pts[:, :2], k)
     return np.bincount(labels, minlength=k).tolist()
+
+
+def selection_feature_stats(ref: str, indices: list[int], top: int = 5) -> dict | None:
+    """Profile a lasso selection by FEATURE, against the whole population.
+
+    Maps the selected embedding-point indices back to real dataset rows (via the
+    mapping stored at embed time), slices the actual feature matrix, and expresses
+    each numeric column's selection mean as a z-score from the population mean.
+    Features are ranked by |z| — the ones that most distinguish the region. This
+    is what turns "70% cluster B" into "this region skews high on spend, low on
+    recency", grounded in numbers. Returns None when the embedding or the
+    selection can't be resolved (e.g. a typed follow-up with no live selection)."""
+    meta = _EMBED_META.get(ref)
+    if meta is None:
+        return None
+    ds, rows = meta
+    n_pts = len(rows)
+    sel = np.fromiter((i for i in indices if 0 <= int(i) < n_pts), dtype=np.int64)
+    if sel.size == 0:
+        return None
+
+    feats = ds.features  # (n, n_numeric), NaN-imputed — same matrix the embedding came from
+    pop_mean = feats.mean(0)
+    pop_std = np.where(feats.std(0) == 0.0, 1.0, feats.std(0))
+    sel_mean = feats[rows[sel]].mean(0)
+    z = (sel_mean - pop_mean) / pop_std
+
+    order = np.argsort(-np.abs(z))[:top]
+    cols = ds.numeric_cols
+    features = [
+        {
+            "feature": cols[i] if i < len(cols) else f"col_{i}",
+            "z": round(float(z[i]), 3),
+            "selMean": round(float(sel_mean[i]), 4),
+            "popMean": round(float(pop_mean[i]), 4),
+            "direction": "above" if z[i] >= 0 else "below",
+        }
+        for i in order
+    ]
+    return {"selected": int(sel.size), "population": int(feats.shape[0]), "features": features}

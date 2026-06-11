@@ -149,7 +149,7 @@ back. Swapping them is a one-line proxy change.
 **Why two backends?** The Node mock (`frontend/mock/`) means a frontend dev can
 run the whole experience with zero Python. The FastAPI service
 (`backend/`) is the real thing — it does actual numpy ML over real uploaded data
-and calls Claude. Both emit byte-compatible frames, so the frontend never knows
+and calls Claude (or rather which API key you provide). Both emit byte-compatible frames, so the frontend never knows
 which it's talking to. The protocol is the seam.
 
 | Layer | Tech | Where |
